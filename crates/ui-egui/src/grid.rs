@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use gridcraft_engine::cf::{CfCache, CfLook};
-use gridcraft_engine::core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
+use gridcraft_engine::core::{
+    CellRef, MAX_COLS, MAX_ROWS, RangeRef, TextDirection, Value, col_to_letters, contains_rtl, detect_direction, shape_bidi,
+};
 use gridcraft_engine::model::{BorderLine, BorderStyle, Color, HAlign, LineIndex, PatternType, Sheet, Style, Underline, VAlign, Workbook};
 use serde_json::json;
 
@@ -1171,11 +1173,19 @@ pub(crate) fn paint_quadrant(
             continue;
         }
         let color = ncolor.unwrap_or(lk.text_color);
+        let effective_dir = match st.align.text_direction {
+            TextDirection::Auto => detect_direction(&text),
+            dir => dir,
+        };
+        if fill_char.is_none() && (effective_dir == TextDirection::Rtl || contains_rtl(&text)) {
+            text = shape_bidi(&text).into_owned();
+        }
         let halign = match st.align.h {
             HAlign::General => match v {
                 Value::Number(_) => HAlign::Right,
                 Value::Bool(_) | Value::Error(_) => HAlign::Center,
                 _ if numeric => HAlign::Right,
+                _ if effective_dir == TextDirection::Rtl => HAlign::Right,
                 _ => HAlign::Left,
             },
             h => h,
