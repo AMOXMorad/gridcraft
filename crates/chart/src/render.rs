@@ -147,7 +147,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
         return vec![];
     }
     match chart.kind {
-        ChartKind::Pie | ChartKind::Doughnut | ChartKind::Treemap | ChartKind::Sunburst => {
+        ChartKind::Pie | ChartKind::PieOfPie | ChartKind::BarOfPie | ChartKind::Doughnut | ChartKind::Treemap | ChartKind::Sunburst => {
             let n = first_len(data).min(MAX_CATS);
             (0..n).map(|j| (cat_label(data, j), point_color(data, j), Swatch::Box)).collect()
         }
@@ -251,7 +251,7 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
 fn draw_kind(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) {
     use ChartKind::*;
     match chart.kind {
-        Pie => pie(ctx, chart, data, area, 0.0, false),
+        Pie | PieOfPie | BarOfPie => pie(ctx, chart, data, area, 0.0, false),
         Doughnut => pie(ctx, chart, data, area, 0.5, false),
         Sunburst => pie(ctx, chart, data, area, 0.2, true),
         Treemap => treemap(ctx, chart, data, area),

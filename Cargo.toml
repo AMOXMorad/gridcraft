@@ -20,6 +20,7 @@ gridcraft-model = { path = "crates/model" }
 gridcraft-calc = { path = "crates/calc" }
 gridcraft-xlsx = { path = "crates/xlsx" }
 gridcraft-chart = { path = "crates/chart" }
+gridcraft-ai = { path = "crates/ai" }
 gridcraft-engine = { path = "crates/engine" }
 gridcraft-ui-egui = { path = "crates/ui-egui" }
 gridcraft-mcp = { path = "crates/mcp" }

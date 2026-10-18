@@ -35,9 +35,10 @@ pub fn requires(k: ChartKind) -> (&'static str, &'static str) {
 // ---------------------------------------------------------------- reading
 
 fn kind_of(layout: &str) -> Option<ChartKind> {
-    Some(match layout {
-        "clusteredColumn" | "paretoLine" => ChartKind::Histogram,
-        "boxWhisker" => ChartKind::BoxWhisker,
+    let l = layout.trim().to_ascii_lowercase();
+    Some(match l.as_str() {
+        "clusteredcolumn" | "paretoline" | "histogram" | "pareto" => ChartKind::Histogram,
+        "boxwhisker" | "boxandwhisker" | "box" => ChartKind::BoxWhisker,
         "waterfall" => ChartKind::Waterfall,
         "funnel" => ChartKind::Funnel,
         "treemap" => ChartKind::Treemap,
@@ -47,9 +48,17 @@ fn kind_of(layout: &str) -> Option<ChartKind> {
 }
 
 fn formula(dim: &El) -> Option<String> {
-    let f = dim.child("f")?;
-    let t = f.text.trim();
-    Some(crate::fmla::from_file(t.strip_prefix('=').unwrap_or(t)))
+    if let Some(f) = dim.child("f") {
+        let t = f.text.trim();
+        return Some(crate::fmla::from_file(t.strip_prefix('=').unwrap_or(t)));
+    }
+    for lvl in dim.kids("lvl") {
+        let pts: Vec<String> = lvl.kids("pt").map(|p| p.text.trim().to_string()).collect();
+        if !pts.is_empty() {
+            return Some(format!("{{{}}}", pts.join(",")));
+        }
+    }
+    None
 }
 
 fn text(tx: &El) -> Option<String> {
@@ -77,23 +86,37 @@ pub fn read_chartex(root: &El) -> Option<Chart> {
             cd.kids("data")
                 .map(|d| {
                     let id = d.attr("id").unwrap_or("").to_string();
-                    let cat = d.kids("strDim").chain(d.kids("numDim")).find(|x| matches!(x.attr("type"), Some("cat" | "x"))).and_then(formula);
-                    let val = d.kids("numDim").find(|x| matches!(x.attr("type"), Some("val" | "size" | "y"))).and_then(formula);
+                    let is_dim = |x: &El, valid: &[&str]| x.attr("type").map(|t| valid.iter().any(|v| t.eq_ignore_ascii_case(v))).unwrap_or(false);
+                    let cat = d.kids("strDim").chain(d.kids("numDim")).find(|x| is_dim(x, &["cat", "x"])).and_then(formula);
+                    let val = d.kids("numDim").chain(d.kids("strDim")).find(|x| is_dim(x, &["val", "size", "y"])).and_then(formula);
                     (id, cat, val)
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let series_kind = |s: &El| {
+        s.attr("layoutId").and_then(kind_of).or_else(|| region.attr("layoutId").and_then(kind_of)).or_else(|| {
+            if s.path(&["layoutPr", "binning"]).is_some() {
+                Some(ChartKind::Histogram)
+            } else if s.path(&["layoutPr", "statistics"]).is_some() {
+                Some(ChartKind::BoxWhisker)
+            } else if s.path(&["layoutPr", "parentLabelLayout"]).is_some() {
+                Some(ChartKind::Treemap)
+            } else {
+                None
+            }
+        })
+    };
     let mut kind = None;
     let mut series = vec![];
     let mut data_labels = false;
     for s in region.kids("series") {
         let layout = s.attr("layoutId").unwrap_or("");
         // A Pareto line belongs to its histogram.
-        if layout == "paretoLine" {
+        if layout.eq_ignore_ascii_case("paretoLine") {
             continue;
         }
-        let k = kind_of(layout)?;
+        let k = series_kind(s)?;
         kind.get_or_insert(k);
         let id = s.child_val("dataId").unwrap_or("");
         let (cat, val) = data.iter().find(|(i, _, _)| i == id).map(|(_, c, v)| (c.clone(), v.clone())).unwrap_or_default();
@@ -259,7 +282,7 @@ pub fn write_chartex(wb: &Workbook, si: usize, ch: &Chart, names: &mut Vec<Strin
     );
     for (i, ser) in ch.series.iter().enumerate() {
         let _ = write!(s, "<cx:data id=\"{i}\">");
-        if let Some(c) = ser.categories.as_deref().filter(|_| ch.kind != ChartKind::Histogram) {
+        if let Some(c) = &ser.categories {
             let _ = write!(s, "<cx:strDim type=\"cat\">{}</cx:strDim>", f_xml(wb, si, c, names));
         }
         let _ = write!(s, "<cx:numDim type=\"{}\">{}</cx:numDim>", if hierarchy { "size" } else { "val" }, f_xml(wb, si, &ser.values, names));

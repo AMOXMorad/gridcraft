@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+pub use gridcraft_core::TextDirection;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StyleId(pub u32);
 
@@ -316,6 +318,7 @@ pub struct Alignment {
     pub indent: u8,
     /// Degrees -90..=90, or 255 for vertical stacked text.
     pub rotation: i16,
+    pub text_direction: TextDirection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -339,6 +342,13 @@ pub struct Style {
     /// Number format code; "General" by default.
     pub num_fmt: NumFmt,
     pub protection: Protection,
+}
+
+impl Style {
+    /// Text direction for this cell style (delegates to alignment).
+    pub fn text_direction(&self) -> TextDirection {
+        self.align.text_direction
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -443,5 +453,15 @@ mod tests {
         assert_eq!(Color::Theme(0, -500).resolve(&th), Some([128, 128, 128]));
         assert_eq!(Color::Theme(1, 500).resolve(&th), Some([128, 128, 128]));
         assert_eq!(Color::Auto.resolve(&th), None);
+    }
+
+    #[test]
+    fn text_direction_in_style() {
+        let mut t = StyleTable::default();
+        let rtl = t.derive(StyleId::DEFAULT, |s| s.align.text_direction = TextDirection::Rtl);
+        assert_ne!(rtl, StyleId::DEFAULT);
+        assert_eq!(t.get(rtl).text_direction(), TextDirection::Rtl);
+        assert_eq!(t.get(rtl).align.text_direction, TextDirection::Rtl);
+        assert_eq!(t.get(StyleId::DEFAULT).text_direction(), TextDirection::Auto);
     }
 }

@@ -6,7 +6,8 @@ use std::fmt::Write as _;
 
 use gridcraft_model::style::Protection;
 use gridcraft_model::{
-    Alignment, BorderLine, BorderStyle, Borders, Color, Fill, Font, HAlign, NumFmt, PatternType, Style, Underline, VAlign, VertAlign, Workbook,
+    Alignment, BorderLine, BorderStyle, Borders, Color, Fill, Font, HAlign, NumFmt, PatternType, Style, TextDirection, Underline, VAlign, VertAlign,
+    Workbook,
 };
 
 use crate::tables::{INDEXED, builtin_format, builtin_id};
@@ -251,6 +252,11 @@ fn read_alignment(a: &El) -> Alignment {
         shrink: a.flag("shrinkToFit", false),
         indent: a.attr_u32("indent").unwrap_or(0).min(250) as u8,
         rotation: 0,
+        text_direction: match a.attr_u32("readingOrder") {
+            Some(1) => TextDirection::Ltr,
+            Some(2) => TextDirection::Rtl,
+            _ => TextDirection::Auto,
+        },
     };
     if let Some(r) = a.attr_i64("textRotation") {
         al.rotation = match r {
@@ -533,6 +539,11 @@ fn alignment_xml(a: &Alignment) -> Option<String> {
     }
     if a.shrink {
         s.push_str(" shrinkToFit=\"1\"");
+    }
+    match a.text_direction {
+        TextDirection::Auto => {}
+        TextDirection::Ltr => s.push_str(" readingOrder=\"1\""),
+        TextDirection::Rtl => s.push_str(" readingOrder=\"2\""),
     }
     s.push_str("/>");
     Some(s)

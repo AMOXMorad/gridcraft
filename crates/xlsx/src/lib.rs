@@ -79,10 +79,33 @@ impl ReadReport {
     }
 }
 
+/// Options controlling how workbooks are read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Maximum number of cells to load per sheet. `None` for unlimited.
+    pub max_cells_per_sheet: Option<usize>,
+    /// Maximum total bytes of string data to load. `None` for unlimited.
+    pub max_string_bytes: Option<usize>,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            max_cells_per_sheet: Some(50_000_000), // 50M cells
+            max_string_bytes: Some(1_073_741_824), // 1 GB
+        }
+    }
+}
+
+/// Reads an `.xlsx` / `.xlsm` / `.xltx` / `.xltm` package with custom read options.
+pub fn read_xlsx_with_options(bytes: &[u8], options: &ReadOptions) -> Result<(Workbook, ReadReport), IoError> {
+    read::read_xlsx_with_options(bytes, options)
+}
+
 /// Reads an `.xlsx` / `.xlsm` / `.xltx` / `.xltm` package (the workbook part is found through the
 /// package relationships, so every main-part content type is accepted).
 pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
-    read::read_xlsx(bytes)
+    read::read_xlsx_with_options(bytes, &ReadOptions::default())
 }
 
 /// Which member of the SpreadsheetML family a package is saved as. Only the content type of the

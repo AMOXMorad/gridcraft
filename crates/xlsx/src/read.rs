@@ -30,6 +30,8 @@ pub struct Ctx<'a> {
     pub cell_pictures: Vec<Option<Arc<CellPicture>>>,
     /// x14 conditional-format ids of the current sheet's data bars, with the index of the rule in `cond_formats`.
     pub cf_ext_ids: Vec<(String, usize)>,
+    pub options: crate::ReadOptions,
+    pub total_string_bytes: usize,
 }
 
 impl Ctx<'_> {
@@ -66,7 +68,7 @@ pub fn find_rel<'r>(rels: &'r [Rel], kind: &str) -> Option<&'r Rel> {
     rels.iter().find(|r| r.kind == kind)
 }
 
-pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
+pub fn read_xlsx_with_options(bytes: &[u8], options: &crate::ReadOptions) -> Result<(Workbook, ReadReport), IoError> {
     let pkg = Package::open(bytes)?;
     let mut cx = Ctx {
         pkg,
@@ -82,6 +84,8 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
         num_fmts: Default::default(),
         cell_pictures: vec![],
         cf_ext_ids: vec![],
+        options: options.clone(),
+        total_string_bytes: 0,
     };
     let root_rels = cx.pkg.rels("")?;
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
@@ -145,11 +149,26 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
         match cx.pkg.read(&r.target)? {
             Some(b) => {
                 let mut sst = Vec::new();
+                let mut string_bytes = cx.total_string_bytes;
+                let max_str = cx.options.max_string_bytes;
+                let mut exceeded = false;
                 let res = xml::parse_streaming(&b, &["si"], &mut |si| {
-                    sst.push(Arc::from(xml::rich_text(&si)));
+                    let text = xml::rich_text(&si);
+                    string_bytes = string_bytes.saturating_add(text.len());
+                    if let Some(limit) = max_str
+                        && string_bytes > limit
+                    {
+                        exceeded = true;
+                        return Err(IoError::TooLarge(format!("string data exceeds limit of {limit} bytes")));
+                    }
+                    sst.push(Arc::from(text));
                     Ok(())
                 });
+                cx.total_string_bytes = string_bytes;
                 if let Err(e) = res {
+                    if exceeded {
+                        return Err(e);
+                    }
                     cx.warn(format!("shared strings are damaged ({e}); kept {} strings", sst.len()));
                 }
                 cx.sst = sst;
@@ -264,8 +283,9 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
             if lname == "_xlnm._filterdatabase" {
                 continue;
             }
-            if lname.starts_with("_xlchart.") {
-                chart_names.push((lname, crate::fmla::from_file(text)));
+            let stripped = lname.strip_prefix("_xlnm.").unwrap_or(&lname);
+            if stripped.starts_with("_xlchart.") {
+                chart_names.push((stripped.to_string(), crate::fmla::from_file(text)));
                 continue;
             }
             if lname == "_xlnm.print_area" || lname == "_xlnm.print_titles" {
@@ -293,8 +313,11 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
     }
 
     if !chart_names.is_empty() {
+        fn norm(s: &str) -> &str {
+            s.strip_prefix("_xlnm.").unwrap_or(s)
+        }
         let resolve = |f: &mut String| {
-            if let Some((_, r)) = chart_names.iter().find(|(n, _)| f.eq_ignore_ascii_case(n)) {
+            if let Some((_, r)) = chart_names.iter().find(|(n, _)| norm(f).eq_ignore_ascii_case(norm(n))) {
                 *f = r.clone();
             }
         };

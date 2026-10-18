@@ -40,7 +40,7 @@ fn sample() -> Workbook {
         s.fill = Fill::solid(Color::Rgb(0xFFEE00));
         s.borders.bottom = BorderLine { style: BorderStyle::Double, color: Color::Rgb(0xFF0000) };
         s.borders.diag_down = BorderLine::thin();
-        s.align = Alignment { h: HAlign::Center, v: VAlign::Top, wrap: true, shrink: false, indent: 1, rotation: -30 };
+        s.align = Alignment { h: HAlign::Center, v: VAlign::Top, wrap: true, shrink: false, indent: 1, rotation: -30, ..Alignment::default() };
         s.protection.locked = false;
     });
     let money = wb.styles.derive(StyleId::DEFAULT, |s| s.num_fmt = NumFmt::new("#,##0.00 \"€\""));
@@ -1163,4 +1163,40 @@ fn doc_props_keep_boundary_whitespace() {
     };
     let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
     assert_eq!(back.props, wb.props);
+}
+
+#[test]
+fn roundtrip_cell_with_rtl_text_direction() {
+    let mut wb = Workbook::new();
+    let rtl_style = wb.styles.derive(StyleId::DEFAULT, |s| {
+        s.align.text_direction = TextDirection::Rtl;
+    });
+    let ltr_style = wb.styles.derive(StyleId::DEFAULT, |s| {
+        s.align.text_direction = TextDirection::Ltr;
+    });
+
+    let s = wb.sheet_mut(0).unwrap();
+    s.set_value(at("A1"), Value::Text("مرحبا بالعالم".into()));
+    s.set_style(at("A1"), rtl_style);
+
+    s.set_value(at("B1"), Value::Text("Hello world".into()));
+    s.set_style(at("B1"), ltr_style);
+
+    let bytes = write_xlsx(&wb).unwrap();
+
+    let (back, rep) = read_xlsx(&bytes).unwrap();
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+
+    let sheet = back.sheet(0).unwrap();
+    let cell_a1 = sheet.cell(at("A1")).unwrap();
+    let cell_b1 = sheet.cell(at("B1")).unwrap();
+
+    let style_a1 = back.styles.get(cell_a1.style);
+    let style_b1 = back.styles.get(cell_b1.style);
+
+    assert_eq!(style_a1.align.text_direction, TextDirection::Rtl);
+    assert_eq!(style_a1.text_direction(), TextDirection::Rtl);
+
+    assert_eq!(style_b1.align.text_direction, TextDirection::Ltr);
+    assert_eq!(style_b1.text_direction(), TextDirection::Ltr);
 }

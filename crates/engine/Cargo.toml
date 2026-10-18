@@ -8,6 +8,10 @@ description = "GridCraft engine: sessions, commands, history, clipboard, fill, s
 [lints]
 workspace = true
 
+[features]
+default = []
+ai = ["dep:gridcraft-ai"]
+
 [dependencies]
 gridcraft-core = { workspace = true }
 gridcraft-numfmt = { workspace = true }
@@ -21,6 +25,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 gridcraft-xlsx = { workspace = true }
 gridcraft-chart = { workspace = true }
+gridcraft-ai = { workspace = true, optional = true }
 gridcraft-pdf = { workspace = true }
 image = { workspace = true }
 

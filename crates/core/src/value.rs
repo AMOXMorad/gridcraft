@@ -309,18 +309,43 @@ pub fn compare(a: &Value, b: &Value) -> Ordering {
 /// Compares numbers the way Excel does: both are rounded to 15 significant digits first, so binary
 /// noise such as `0.1+0.2` versus `0.3` counts as equal.
 pub fn compare_numbers(a: f64, b: f64) -> Ordering {
-    fn round15(x: f64) -> f64 {
-        if !x.is_finite() || x == 0.0 { x } else { format!("{x:.14e}").parse().unwrap_or(x) }
-    }
     if a == b {
         return Ordering::Equal;
     }
-    // Numbers further apart than the 15th digit can't round together, and rounding keeps their
-    // order: skip the text round trip (this is on the sort and lookup hot path).
-    if (a - b).abs() > a.abs().max(b.abs()) * 1e-13 {
+    // Fast path: numbers far apart can't round together.
+    let max_abs = a.abs().max(b.abs());
+    if max_abs == 0.0 {
+        return Ordering::Equal;
+    }
+    let diff = (a - b).abs();
+    // 15 significant digits ≈ 5e-15 relative tolerance.
+    // If the difference is much larger than this, skip the expensive rounding.
+    if diff > max_abs * 1e-13 {
         return a.partial_cmp(&b).unwrap_or(Ordering::Equal);
     }
+    // Round both to 15 significant digits using integer arithmetic (no string round-trip).
     round15(a).partial_cmp(&round15(b)).unwrap_or(Ordering::Equal)
+}
+
+/// Round a finite non-zero f64 to 15 significant digits without a string round-trip.
+pub fn round15(x: f64) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    let magnitude = x.abs().log10().floor() as i32;
+    let p = 14 - magnitude;
+    if p > 308 {
+        let scale1 = 10f64.powi(p - 300);
+        let scale2 = 10f64.powi(300);
+        let r = ((x * scale2) * scale1).round() / scale1 / scale2;
+        if r.is_finite() { r } else { x }
+    } else if p < -308 {
+        x
+    } else {
+        let scale = 10f64.powi(p);
+        let r = (x * scale).round() / scale;
+        if r.is_finite() { r } else { x }
+    }
 }
 
 /// Case-insensitive text order (Unicode lowercase).
@@ -440,6 +465,28 @@ mod tests {
         assert_ne!(compare(&num(0.1 + 0.2), &num(0.3)), Ordering::Greater);
         assert_eq!(compare(&num(1.0), &num(1.00000000000001)), Ordering::Less);
         assert_eq!(compare(&num(1.0), &num(2.0)), Ordering::Less);
+    }
+
+    #[test]
+    fn compare_numbers_15_digit_rounding() {
+        use std::cmp::Ordering::*;
+        // 0.1 + 0.2 should equal 0.3 (the classic IEEE-754 issue)
+        assert_eq!(compare_numbers(0.1 + 0.2, 0.3), Equal);
+        // 1/3 * 3 should equal 1
+        assert_eq!(compare_numbers(1.0 / 3.0 * 3.0, 1.0), Equal);
+        // Obviously different numbers should NOT be equal
+        assert_eq!(compare_numbers(1.0, 2.0), Less);
+        assert_eq!(compare_numbers(2.0, 1.0), Greater);
+        // Very small numbers
+        assert_eq!(compare_numbers(1e-300, 1e-300 + 1e-315), Equal);
+        // Zero handling
+        assert_eq!(compare_numbers(0.0, 0.0), Equal);
+        assert_eq!(compare_numbers(0.0, 1e-20), Less);
+        // NaN handling
+        assert_eq!(compare_numbers(f64::NAN, f64::NAN), Equal);
+        // Infinity
+        assert_eq!(compare_numbers(f64::INFINITY, f64::INFINITY), Equal);
+        assert_eq!(compare_numbers(f64::NEG_INFINITY, f64::INFINITY), Less);
     }
 
     #[test]

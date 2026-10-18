@@ -548,6 +548,8 @@ pub fn chart_kind(t: &str, sub: &str) -> ChartKind {
         ("line", "markers") => ChartKind::LineMarkers,
         ("line", "stacked") => ChartKind::LineStacked,
         ("line", _) => ChartKind::Line,
+        ("pie", "pieOfPie") => ChartKind::PieOfPie,
+        ("pie", "barOfPie") => ChartKind::BarOfPie,
         ("pie", _) => ChartKind::Pie,
         ("doughnut", _) => ChartKind::Doughnut,
         ("area", "stacked") => ChartKind::AreaStacked,
@@ -752,9 +754,22 @@ pub fn build_chart(s: &Session, p: &Json) -> Result<(usize, Chart)> {
         },
         title,
         series,
-        legend: if matches!(kind, ChartKind::Pie | ChartKind::Doughnut) { LegendPos::Right } else { LegendPos::Bottom },
+        legend: if matches!(kind, ChartKind::Pie | ChartKind::PieOfPie | ChartKind::BarOfPie | ChartKind::Doughnut) {
+            LegendPos::Right
+        } else {
+            LegendPos::Bottom
+        },
         data_labels: false,
-        gridlines: !matches!(kind, ChartKind::Pie | ChartKind::Doughnut | ChartKind::Treemap | ChartKind::Sunburst | ChartKind::Funnel),
+        gridlines: !matches!(
+            kind,
+            ChartKind::Pie
+                | ChartKind::PieOfPie
+                | ChartKind::BarOfPie
+                | ChartKind::Doughnut
+                | ChartKind::Treemap
+                | ChartKind::Sunburst
+                | ChartKind::Funnel
+        ),
         style: 1,
         x_title: None,
         y_title: None,

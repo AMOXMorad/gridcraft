@@ -1294,3 +1294,35 @@ fn median_large_values_recalculate_dependents() {
         assert!((t.num(cell) + 1.3).abs() < 1e-14);
     }
 }
+
+#[test]
+fn hundred_thousand_chain_recalc() {
+    let mut wb = Workbook::new();
+    let n = 100_000u32;
+    if let Some(sh) = wb.sheet_mut(0) {
+        sh.cells.set(CellRef::new(0, 0), Cell::value(Value::Number(1.0)));
+        for r in 1..n {
+            sh.cells.set(CellRef::new(r, 0), Cell::formula(Formula::new(&format!("=A{}+1", r))));
+        }
+    }
+    let mut calc = Calc::new();
+    calc.recalc_all(&mut wb);
+    let last = wb.sheet(0).map(|s| s.value(CellRef::new(n - 1, 0)));
+    assert_eq!(last, Some(Value::Number(f64::from(n))));
+}
+
+#[test]
+fn independent_parallel_recalc() {
+    let mut wb = Workbook::new();
+    let n = 10_000u32;
+    if let Some(sh) = wb.sheet_mut(0) {
+        for r in 0..n {
+            sh.cells.set(CellRef::new(r, 0), Cell::formula(Formula::new(&format!("={r} * 2"))));
+        }
+    }
+    let mut calc = Calc::new();
+    calc.recalc_all(&mut wb);
+    for r in (0..n).step_by(500) {
+        assert_eq!(wb.sheet(0).map(|s| s.value(CellRef::new(r, 0))), Some(Value::Number(f64::from(r * 2))));
+    }
+}

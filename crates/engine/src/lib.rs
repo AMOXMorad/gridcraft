@@ -31,6 +31,8 @@ use serde::Serialize;
 use serde_json::Value as Json;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command, register_test_command};
+#[cfg(feature = "ai")]
+pub use gridcraft_ai as ai;
 pub use gridcraft_calc as calc;
 pub use gridcraft_core as core;
 pub use gridcraft_formula as formula;

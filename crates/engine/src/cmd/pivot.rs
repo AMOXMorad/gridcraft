@@ -1442,9 +1442,22 @@ fn insert_pivot_chart(s: &mut Session, p: &Json) -> Result<Json> {
         },
         title,
         series,
-        legend: if matches!(kind, ChartKind::Pie | ChartKind::Doughnut) { LegendPos::Right } else { LegendPos::Bottom },
+        legend: if matches!(kind, ChartKind::Pie | ChartKind::PieOfPie | ChartKind::BarOfPie | ChartKind::Doughnut) {
+            LegendPos::Right
+        } else {
+            LegendPos::Bottom
+        },
         data_labels: false,
-        gridlines: !matches!(kind, ChartKind::Pie | ChartKind::Doughnut | ChartKind::Treemap | ChartKind::Sunburst | ChartKind::Funnel),
+        gridlines: !matches!(
+            kind,
+            ChartKind::Pie
+                | ChartKind::PieOfPie
+                | ChartKind::BarOfPie
+                | ChartKind::Doughnut
+                | ChartKind::Treemap
+                | ChartKind::Sunburst
+                | ChartKind::Funnel
+        ),
         style: 1,
         x_title: None,
         y_title: None,

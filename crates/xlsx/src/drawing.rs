@@ -133,8 +133,8 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
             .iter()
             .flat_map(|o| match o.name.as_str() {
                 "AlternateContent" => o
-                    .child("Choice")
-                    .filter(|c| c.child("graphicFrame").is_some())
+                    .kids("Choice")
+                    .find(|c| c.child("graphicFrame").is_some())
                     .or_else(|| o.child("Fallback"))
                     .map(|c| c.children.iter().collect())
                     .unwrap_or_default(),
@@ -161,12 +161,15 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                 "graphicFrame" => {
                     let Some(gd) = obj.path(&["graphic", "graphicData"]) else { continue };
                     let uri = gd.attr("uri").unwrap_or("");
-                    if let Some(rid) = gd.child("chart").and_then(|c| c.attr("id")) {
+                    let chart_el = gd.child("chart").or_else(|| gd.child("chartEx")).or_else(|| gd.child("chartSpace"));
+                    if let Some(rid) = chart_el.and_then(|c| c.attr("id").or_else(|| c.attr("rid"))) {
                         let Some(rel) = rels.iter().find(|r| r.id == rid) else { continue };
                         let target = rel.target.clone();
                         if let Some(cx_xml) = cx.optional_xml(&target)? {
-                            let chartex = uri.contains("chartex");
-                            match if chartex { crate::chartex::read_chartex(&cx_xml) } else { crate::chart::read_chart(&cx_xml) } {
+                            let is_chartex = uri.to_ascii_lowercase().contains("chartex")
+                                || target.contains("chartEx")
+                                || cx_xml.path(&["chart", "plotArea", "plotAreaRegion"]).is_some();
+                            match if is_chartex { crate::chartex::read_chartex(&cx_xml) } else { crate::chart::read_chart(&cx_xml) } {
                                 Some(mut ch) => {
                                     ch.id = cx.next_object_id();
                                     ch.anchor = anchor;
@@ -175,7 +178,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                                 None => cx.warn(format!("chart {target} has no supported plot and was skipped")),
                             }
                         }
-                    } else if uri.contains("chartex") || uri.contains("chartEx") {
+                    } else if uri.to_ascii_lowercase().contains("chartex") {
                         cx.warn("a histogram, waterfall, treemap… chart without its chart part was skipped");
                     } else {
                         cx.warn("an embedded object (SmartArt, OLE…) was skipped");

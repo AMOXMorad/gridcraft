@@ -35,6 +35,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("calc", Class::Layer(2)),
     ("xlsx", Class::Layer(2)),
     ("chart", Class::Layer(3)),
+    ("ai", Class::Layer(4)),
     ("engine", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("mcp", Class::Layer(6)),
@@ -232,7 +233,16 @@ mod tests {
             c("gridcraft-calc", &[("gridcraft-model", Normal, true), ("gridcraft-functions", Normal, true), ("gridcraft-numfmt", Normal, true)]),
             c("gridcraft-xlsx", &[("gridcraft-core", Normal, true), ("gridcraft-formula", Normal, true), ("gridcraft-model", Normal, true)]),
             c("gridcraft-chart", &[("gridcraft-model", Normal, true)]),
-            c("gridcraft-engine", &[("gridcraft-calc", Normal, true), ("gridcraft-xlsx", Normal, true), ("gridcraft-chart", Normal, true)]),
+            c("gridcraft-ai", &[("gridcraft-core", Normal, true), ("gridcraft-formula", Normal, true)]),
+            c(
+                "gridcraft-engine",
+                &[
+                    ("gridcraft-calc", Normal, true),
+                    ("gridcraft-xlsx", Normal, true),
+                    ("gridcraft-chart", Normal, true),
+                    ("gridcraft-ai", Normal, true),
+                ],
+            ),
             c("gridcraft-ui-egui", &[("gridcraft-engine", Normal, true), ("egui", Normal, false), ("wgpu", Normal, false)]),
             c("gridcraft-cli", &[("gridcraft-ui-egui", Normal, true), ("gridcraft-mcp", Normal, true)]),
         ];

@@ -438,15 +438,31 @@ impl<'a> PassHost<'a> {
 /// Whether an array result at `k` can't spill: it is in a table, or its area runs off the sheet,
 /// overlaps merged cells, holds other cells, or another formula's spill (unless that formula is
 /// recalculated in this pass, and so may spill elsewhere now).
-fn spill_blocked(host: &PassHost<'_>, (sheet, anchor): Key, a: &Array) -> bool {
-    let Some(sh) = host.wb.sheet(sheet) else { return false };
+fn spill_blocked_wb(
+    wb: &Workbook,
+    exprs: &HashMap<Key, std::sync::Arc<Expr>>,
+    spills: &HashMap<Key, std::sync::Arc<Array>>,
+    (sheet, anchor): Key,
+    a: &Array,
+) -> bool {
+    let Some(sh) = wb.sheet(sheet) else { return false };
     let end =
         CellRef::new(anchor.row.saturating_add((a.rows as u32).saturating_sub(1)), anchor.col.saturating_add((a.cols as u32).saturating_sub(1)));
     let range = RangeRef::new(anchor, end);
     let own = sh.spill_ranges.get(&anchor);
     let spilled_over = |c: CellRef| {
         !own.is_some_and(|o| o.contains(c))
-            && sh.spill_ranges.iter().any(|(o, r)| *o != anchor && r.contains(c) && !host.exprs.contains_key(&(sheet, *o)))
+            && (sh.spill_ranges.iter().any(|(o, r)| *o != anchor && r.contains(c) && !exprs.contains_key(&(sheet, *o)))
+                || spills.iter().any(|(o, arr)| {
+                    if o.0 != sheet || *o == (sheet, anchor) {
+                        return false;
+                    }
+                    let end = CellRef::new(
+                        o.1.row.saturating_add((arr.rows as u32).saturating_sub(1)),
+                        o.1.col.saturating_add((arr.cols as u32).saturating_sub(1)),
+                    );
+                    RangeRef::new(o.1, end).contains(c)
+                }))
     };
     end.row >= gridcraft_core::MAX_ROWS
         || end.col >= gridcraft_core::MAX_COLS
@@ -454,6 +470,20 @@ fn spill_blocked(host: &PassHost<'_>, (sheet, anchor): Key, a: &Array) -> bool {
         || sh.tables.iter().any(|t| t.range.contains(anchor))
         || sh.cells.iter_range(range).any(|(c, cell)| c != anchor && (!cell.value.is_empty() || cell.formula.is_some()))
         || sh.spill.range(range.start..=range.end).any(|(c, _)| range.contains(*c) && spilled_over(*c))
+        || spills.iter().any(|(o, arr)| {
+            if o.0 != sheet || *o == (sheet, anchor) {
+                return false;
+            }
+            let o_end = CellRef::new(
+                o.1.row.saturating_add((arr.rows as u32).saturating_sub(1)),
+                o.1.col.saturating_add((arr.cols as u32).saturating_sub(1)),
+            );
+            RangeRef::new(o.1, o_end).intersects(&range)
+        })
+}
+
+fn spill_blocked(host: &PassHost<'_>, k: Key, a: &Array) -> bool {
+    spill_blocked_wb(host.wb, host.exprs, &host.spills, k, a)
 }
 
 impl PassHost<'_> {
@@ -622,6 +652,149 @@ fn fit_to_range(v: Value, range: RangeRef) -> Value {
         }
     }
     Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value))
+}
+
+struct ThreadHost<'a> {
+    wb: &'a Workbook,
+    results: &'a HashMap<Key, Value>,
+    spills: &'a HashMap<Key, std::sync::Arc<Array>>,
+    rng: u64,
+    now: f64,
+}
+
+impl<'a> Host for ThreadHost<'a> {
+    fn workbook(&self) -> &Workbook {
+        self.wb
+    }
+    fn cell_value(&mut self, sheet: usize, c: CellRef) -> Value {
+        let k = (sheet, c);
+        if let Some(v) = self.results.get(&k) {
+            return v.clone();
+        }
+        for (anchor, arr) in self.spills {
+            if anchor.0 == sheet && c.row >= anchor.1.row && c.col >= anchor.1.col {
+                let (dr, dc) = ((c.row - anchor.1.row) as usize, (c.col - anchor.1.col) as usize);
+                if dr < arr.rows && dc < arr.cols {
+                    return arr.get(dr, dc).cloned().unwrap_or_default();
+                }
+            }
+        }
+        self.wb.sheet(sheet).map(|s| s.value(c)).unwrap_or_default()
+    }
+    fn now_serial(&self) -> f64 {
+        self.now
+    }
+    fn random(&mut self) -> f64 {
+        // xorshift64*
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn spill_range(&mut self, sheet: usize, anchor: CellRef) -> Option<RangeRef> {
+        let k = (sheet, anchor);
+        if let Some(arr) = self.spills.get(&k) {
+            let end = CellRef::new(
+                anchor.row.saturating_add((arr.rows as u32).saturating_sub(1)),
+                anchor.col.saturating_add((arr.cols as u32).saturating_sub(1)),
+            );
+            return Some(RangeRef::new(anchor, end));
+        }
+        self.wb.sheet(sheet)?.spill_ranges.get(&anchor).copied()
+    }
+    fn range_values(&mut self, sheet: usize, range: RangeRef) -> Vec<Value> {
+        let (h, w) = (range.height() as usize, range.width() as usize);
+        let mut out = vec![Value::Empty; h * w];
+        let Some(sh) = self.wb.sheet(sheet) else { return out };
+        for (c, cell) in sh.cells.iter_range(range) {
+            let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
+            if let Some(slot) = out.get_mut(i) {
+                *slot = cell.value.clone();
+            }
+        }
+        for (c, v) in sh.spill.range(range.start..=range.end) {
+            if range.contains(*c) {
+                let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
+                if let Some(slot) = out.get_mut(i)
+                    && slot.is_empty()
+                {
+                    *slot = v.clone();
+                }
+            }
+        }
+        for (anchor, arr) in self.spills {
+            if anchor.0 == sheet {
+                for r in 0..arr.rows {
+                    for cc in 0..arr.cols {
+                        let c = CellRef::new(anchor.1.row.saturating_add(r as u32), anchor.1.col.saturating_add(cc as u32));
+                        if c != anchor.1 && range.contains(c) {
+                            let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
+                            if let Some(slot) = out.get_mut(i) {
+                                *slot = arr.get(r, cc).cloned().unwrap_or_default();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (&(s, c), v) in self.results {
+            if s == sheet && range.contains(c) {
+                let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = v.clone();
+                }
+            }
+        }
+        out
+    }
+    fn used_range(&mut self, sheet: usize) -> Option<RangeRef> {
+        self.wb.sheet(sheet).and_then(|s| s.used_range())
+    }
+    fn visit_range(&mut self, sheet: usize, range: RangeRef, f: &mut dyn FnMut(&Value) -> bool) -> bool {
+        let Some(sh) = self.wb.sheet(sheet) else { return false };
+        if self.spills.keys().any(|a| a.0 == sheet) || sh.spill.range(range.start..=range.end).any(|(c, _)| range.contains(*c)) {
+            return false;
+        }
+        for (c, cell) in sh.cells.iter_range(range) {
+            let val = if let Some(v) = self.results.get(&(sheet, c)) { v } else { &cell.value };
+            if !f(val) {
+                return true;
+            }
+        }
+        true
+    }
+}
+
+fn evaluate_single_cell(wb: &Workbook, host: &mut ThreadHost<'_>, k: Key, expr: Option<&Expr>) -> (Key, Value, Option<std::sync::Arc<Array>>) {
+    let Some(expr) = expr else {
+        let v = host.cell_value(k.0, k.1);
+        return (k, v, None);
+    };
+    let mut ev = Evaluator::new(host, k.0, k.1);
+    let v = ev.value(expr);
+    let legacy = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.array);
+    let v = match legacy {
+        Some(range) => fit_to_range(v, range),
+        None => v,
+    };
+    let keep_blanks = matches!(expr, Expr::Call(n, _) if matches!(n.as_str(), "GROUPBY" | "PIVOTBY"));
+    let (v, spill) = match v {
+        Value::Array(a) => {
+            let a = if keep_blanks || !a.data.iter().any(|x| matches!(x, Value::Empty)) {
+                a
+            } else {
+                let data = a.data.iter().map(|x| if matches!(x, Value::Empty) { Value::Number(0.0) } else { x.clone() }).collect();
+                Array::new(a.rows, a.cols, data).map(std::sync::Arc::new).unwrap_or(a)
+            };
+            let spill = if a.rows > 1 || a.cols > 1 { Some(a.clone()) } else { None };
+            (a.data.first().cloned().unwrap_or_default(), spill)
+        }
+        Value::Empty => (Value::Number(0.0), None),
+        v => (v, None),
+    };
+    (k, v, spill)
 }
 
 impl Host for PassHost<'_> {
@@ -947,6 +1120,139 @@ impl Calc {
         seen.into_iter().collect()
     }
 
+    fn topological_levels(&self, dirty: &[Key]) -> (Vec<Vec<Key>>, Vec<Key>) {
+        let dirty_set: HashSet<Key> = dirty.iter().copied().collect();
+        let mut in_degree: HashMap<Key, usize> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
+        let mut adj: HashMap<Key, Vec<Key>> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
+        let mut deps = Vec::new();
+
+        for &k in dirty {
+            deps.clear();
+            self.graph.dependents(k.0, k.1, &mut deps);
+            deps.sort_unstable();
+            deps.dedup();
+            for &d in &deps {
+                if dirty_set.contains(&d) {
+                    adj.entry(k).or_default().push(d);
+                    *in_degree.entry(d).or_default() += 1;
+                }
+            }
+        }
+
+        let mut current_level: Vec<Key> = dirty.iter().copied().filter(|k| in_degree.get(k).copied().unwrap_or(0) == 0).collect();
+        current_level.sort_by_key(|(s, c)| (*s, c.row, c.col));
+
+        let mut levels: Vec<Vec<Key>> = Vec::new();
+        let mut placed: HashSet<Key> = HashSet::with_capacity_and_hasher(dirty.len(), Default::default());
+
+        while !current_level.is_empty() {
+            for &k in &current_level {
+                placed.insert(k);
+            }
+            let mut next_level = Vec::new();
+            for &k in &current_level {
+                if let Some(neighbors) = adj.get(&k) {
+                    for &d in neighbors {
+                        if let Some(deg) = in_degree.get_mut(&d)
+                            && *deg > 0
+                        {
+                            *deg -= 1;
+                            if *deg == 0 && !placed.contains(&d) {
+                                next_level.push(d);
+                            }
+                        }
+                    }
+                }
+            }
+            levels.push(current_level);
+            next_level.sort_by_key(|(s, c)| (*s, c.row, c.col));
+            next_level.dedup();
+            current_level = next_level;
+        }
+
+        let remaining: Vec<Key> = dirty.iter().copied().filter(|k| !placed.contains(k)).collect();
+        (levels, remaining)
+    }
+
+    fn run_parallel(
+        &self,
+        wb: &mut Workbook,
+        exprs: &HashMap<Key, std::sync::Arc<Expr>>,
+        dirty: &[Key],
+        now: f64,
+        rng: &mut u64,
+    ) -> (HashMap<Key, Value>, HashMap<Key, std::sync::Arc<Array>>, Vec<Key>) {
+        let (levels, remaining) = self.topological_levels(dirty);
+        let mut all_results: HashMap<Key, Value> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
+        let mut all_spills: HashMap<Key, std::sync::Arc<Array>> = HashMap::default();
+
+        for level in levels {
+            let level_results: Vec<(Key, Value, Option<std::sync::Arc<Array>>)> = if level.len() > 1 {
+                use rayon::prelude::*;
+                level
+                    .par_iter()
+                    .map(|&k| {
+                        let mut host = ThreadHost {
+                            wb,
+                            results: &all_results,
+                            spills: &all_spills,
+                            rng: (k.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((k.1.row as u64) << 32 | k.1.col as u64),
+                            now,
+                        };
+                        let expr = exprs.get(&k).cloned();
+                        evaluate_single_cell(wb, &mut host, k, expr.as_deref())
+                    })
+                    .collect()
+            } else if let Some(&k) = level.first() {
+                let mut host = ThreadHost { wb, results: &all_results, spills: &all_spills, rng: *rng, now };
+                let expr = exprs.get(&k).cloned();
+                let res = evaluate_single_cell(wb, &mut host, k, expr.as_deref());
+                *rng = host.rng;
+                vec![res]
+            } else {
+                vec![]
+            };
+
+            for (k, mut v, spill) in level_results {
+                let final_spill = if let Some(ref a) = spill {
+                    if a.rows > 1 || a.cols > 1 {
+                        if spill_blocked_wb(wb, exprs, &all_spills, k, a) {
+                            v = Value::Error(CellError::Spill);
+                            None
+                        } else {
+                            Some(a.clone())
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(arr) = final_spill {
+                    all_spills.insert(k, arr);
+                }
+                all_results.insert(k, v);
+            }
+        }
+
+        let mut cycles = Vec::new();
+        if !remaining.is_empty() {
+            let mut host = PassHost::new(wb, exprs, rng, now);
+            for k in &remaining {
+                host.compute(*k);
+            }
+            for (k, v) in host.results {
+                all_results.insert(k, v);
+            }
+            for (k, arr) in host.spills {
+                all_spills.insert(k, arr);
+            }
+            cycles = host.cycles;
+        }
+
+        (all_results, all_spills, cycles)
+    }
+
     /// Evaluates the dirty set and writes results (and spills) back.
     fn run(&mut self, wb: &mut Workbook, mut dirty: Vec<Key>, full: bool) {
         let mut dynamic_again = !self.graph.dynamic.is_empty();
@@ -965,19 +1271,21 @@ impl Calc {
             let now = self.now();
             let mut rng = self.rng;
             let tp = prof_now();
-            let (results, spills, cycles) = {
+            let (results, spills, cycles) = if wb.calc.iterative {
                 let mut host = PassHost::new(wb, &exprs, &mut rng, now);
-                host.iterate = wb.calc.iterative;
+                host.iterate = true;
                 for k in &dirty {
                     host.compute(*k);
                 }
-                if host.iterate && !host.members.is_empty() {
+                if !host.members.is_empty() {
                     let passes = host.iterate_loops(&dirty, wb.calc.max_iterations, wb.calc.max_change);
                     if std::env::var_os("GRIDCRAFT_PROFILE").is_some() {
                         eprintln!("  iterative calculation: {} passes over {} formulas", passes, host.tainted.len());
                     }
                 }
                 (host.results, host.spills, host.cycles)
+            } else {
+                self.run_parallel(wb, &exprs, &dirty, now, &mut rng)
             };
             self.rng = rng;
             if std::env::var_os("GRIDCRAFT_PROFILE").is_some() {

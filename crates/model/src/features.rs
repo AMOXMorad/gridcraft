@@ -379,6 +379,8 @@ pub enum ChartKind {
     LineMarkers,
     LineStacked,
     Pie,
+    PieOfPie,
+    BarOfPie,
     Doughnut,
     Area,
     AreaStacked,

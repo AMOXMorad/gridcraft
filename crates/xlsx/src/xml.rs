@@ -109,7 +109,7 @@ pub(crate) fn to_utf8(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Borrowed(xml)
 }
 
-fn local(name: &[u8]) -> String {
+pub(crate) fn local(name: &[u8]) -> String {
     let n = match name.iter().rposition(|&b| b == b':') {
         Some(i) => name.get(i + 1..).unwrap_or(name),
         None => name,
@@ -117,7 +117,7 @@ fn local(name: &[u8]) -> String {
     String::from_utf8_lossy(n).into_owned()
 }
 
-fn start_el(e: &BytesStart<'_>) -> El {
+pub(crate) fn start_el(e: &BytesStart<'_>) -> El {
     let mut el = El { name: local(e.name().as_ref()), ..Default::default() };
     for a in e.attributes().with_checks(false).flatten() {
         let key = a.key.as_ref();
@@ -134,7 +134,7 @@ fn start_el(e: &BytesStart<'_>) -> El {
     el
 }
 
-fn named_entity(name: &str) -> Option<char> {
+pub(crate) fn named_entity(name: &str) -> Option<char> {
     Some(match name {
         "amp" => '&',
         "lt" => '<',

@@ -1517,6 +1517,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridcraft-ai"
+version = "0.8.0"
+dependencies = [
+ "gridcraft-core",
+ "gridcraft-formula",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "gridcraft-calc"
 version = "0.8.0"
 dependencies = [
@@ -1526,6 +1538,7 @@ dependencies = [
  "gridcraft-model",
  "gridcraft-numfmt",
  "log",
+ "rayon",
 ]
 
 [[package]]
@@ -1565,6 +1578,7 @@ dependencies = [
 name = "gridcraft-engine"
 version = "0.8.0"
 dependencies = [
+ "gridcraft-ai",
  "gridcraft-calc",
  "gridcraft-chart",
  "gridcraft-core",
