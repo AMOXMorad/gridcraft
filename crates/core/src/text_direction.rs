@@ -441,6 +441,123 @@ fn reorder_line_for_harfrust(line: &str, out: &mut String) {
     }
 }
 
+/// Shapes Arabic letters into contextual Presentation Forms-B and reorders bidirectional runs into
+/// strict left-to-right visual order for renderers (such as PDF content streams) that do not run
+/// HarfBuzz / OpenType shaping or BiDi reordering.
+///
+/// If `text` contains no RTL characters, returns `Cow::Borrowed(text)` without allocating.
+pub fn shape_bidi_visual(text: &str) -> Cow<'_, str> {
+    if !contains_rtl(text) {
+        return Cow::Borrowed(text);
+    }
+    let mut result = String::with_capacity(text.len());
+    for (line_idx, line) in text.split('\n').enumerate() {
+        if line_idx > 0 {
+            result.push('\n');
+        }
+        let shaped = shape_arabic_logical(line);
+        reorder_line_visual_strict(&shaped, &mut result);
+    }
+    Cow::Owned(result)
+}
+
+fn reorder_line_visual_strict(shaped_line: &str, out: &mut String) {
+    let chars: Vec<char> = shaped_line.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return;
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RunDir {
+        Rtl,
+        Ltr,
+    }
+
+    let is_ltr_core = |c: char| matches!(bidi_class(c), BidiClass::L | BidiClass::En);
+    let mut dirs = vec![RunDir::Rtl; n];
+    for (i, &ch) in chars.iter().enumerate() {
+        if is_ltr_core(ch) {
+            dirs[i] = RunDir::Ltr;
+        }
+    }
+
+    for i in 0..n {
+        if dirs[i] == RunDir::Ltr {
+            continue;
+        }
+        let ch = chars[i];
+        let prev_ltr = i > 0 && dirs[i - 1] == RunDir::Ltr;
+        let next_ltr = chars.get(i + 1).is_some_and(|&c| is_ltr_core(c));
+        let next2_ltr = chars.get(i + 1).is_some_and(|&c| c == '.')
+            && chars.get(i + 2).is_some_and(|&c| is_ltr_core(c));
+
+        if matches!(ch, '.' | ',' | ':' | '/' | '-' | '+' | '_' | '!') && prev_ltr && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if matches!(ch, '.' | '+' | '-' | '$' | '€' | '£' | '¥' | '#') && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '*' && (next_ltr || next2_ltr) {
+            dirs[i] = RunDir::Ltr;
+            if next2_ltr && i + 1 < n {
+                dirs[i + 1] = RunDir::Ltr;
+            }
+        } else if matches!(ch, '%' | '°') && prev_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '{' && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '}' && prev_ltr {
+            dirs[i] = RunDir::Ltr;
+        }
+    }
+
+    let mut runs: Vec<(RunDir, usize, usize)> = Vec::new();
+    let mut start = 0;
+    while start < n {
+        let d = dirs[start];
+        let mut end = start + 1;
+        while end < n && dirs[end] == d {
+            end += 1;
+        }
+        runs.push((d, start, end));
+        start = end;
+    }
+
+    let base_rtl = detect_direction(shaped_line) != TextDirection::Ltr;
+    if base_rtl {
+        for &(dir, s, e) in runs.iter().rev() {
+            let slice = chars.get(s..e).unwrap_or_default();
+            match dir {
+                RunDir::Rtl => {
+                    for &ch in slice.iter().rev() {
+                        out.push(mirror_bracket(ch));
+                    }
+                }
+                RunDir::Ltr => {
+                    for &ch in slice {
+                        out.push(ch);
+                    }
+                }
+            }
+        }
+    } else {
+        for &(dir, s, e) in &runs {
+            let slice = chars.get(s..e).unwrap_or_default();
+            match dir {
+                RunDir::Rtl => {
+                    for &ch in slice.iter().rev() {
+                        out.push(mirror_bracket(ch));
+                    }
+                }
+                RunDir::Ltr => {
+                    for &ch in slice {
+                        out.push(ch);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

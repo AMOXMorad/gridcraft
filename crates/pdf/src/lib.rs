@@ -12,7 +12,9 @@
 #![forbid(unsafe_code)]
 
 mod metrics;
+mod ttf;
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// RGB colour, 0–255 per channel.
@@ -145,9 +147,19 @@ impl Font {
 
 /// Width of `text` in points when set in `font` at `size` points.
 pub fn text_width(font: Font, size: f32, text: &str) -> f32 {
+    if !is_win_ansi_str(text)
+        && let Some(ttf) = ttf::system_unicode_font()
+    {
+        let units: u64 = text.chars().map(|c| u64::from(ttf.glyph_width_1000(ttf.glyph_id(c)))).sum();
+        return units as f32 * size / 1000.0;
+    }
     // u64: a u32 sum overflows for ~8 million characters.
     let units: u64 = text.chars().map(|c| u64::from(font.char_width(c))).sum();
     units as f32 * size / 1000.0
+}
+
+fn is_win_ansi_str(text: &str) -> bool {
+    text.chars().all(|c| c == '?' || win_ansi(c) != b'?')
 }
 
 /// Unicode → WinAnsiEncoding (CP1252) byte; unmappable characters become `?`.
@@ -266,6 +278,7 @@ pub struct Page {
     height: f32,
     content: String,
     fonts: [bool; 12],
+    unicode_glyphs: BTreeMap<u16, char>,
     images: Vec<ImageData>,
     depth: u32,
 }
@@ -459,11 +472,37 @@ impl Page {
         if text.is_empty() || !extent(size) || !finite(&[x, y]) {
             return;
         }
+        let (sn, cs) = if angle.is_finite() { angle.sin_cos() } else { (0.0, 1.0) };
+        if !is_win_ansi_str(text)
+            && let Some(ttf) = ttf::system_unicode_font()
+        {
+            let mut hex = String::with_capacity(text.len() * 4 + 2);
+            hex.push('<');
+            for c in text.chars() {
+                let gid = ttf.glyph_id(c);
+                self.unicode_glyphs.entry(gid).or_insert(c);
+                let _ = write!(hex, "{gid:04X}");
+            }
+            hex.push('>');
+            let s = format!(
+                "BT\n{}\n/FU {} Tf\n{} {} {} {} {} {} Tm\n{} Tj\nET",
+                rgb_op(color, false),
+                n(size.min(10_000.0)),
+                n(cs),
+                n(-sn),
+                n(sn),
+                n(cs),
+                n(x),
+                n(self.y(y)),
+                hex
+            );
+            self.op(&s);
+            return;
+        }
         let fi = font.index();
         if let Some(f) = self.fonts.get_mut(fi) {
             *f = true;
         }
-        let (sn, cs) = if angle.is_finite() { angle.sin_cos() } else { (0.0, 1.0) };
         // Clockwise in y-down = counter-clockwise negated in PDF's y-up space.
         let s = format!(
             "BT\n{}\n/F{} {} Tf\n{} {} {} {} {} {} Tm\n{} Tj\nET",
@@ -574,6 +613,41 @@ fn pdf_text_string(text: &str) -> String {
     s
 }
 
+fn build_to_unicode_cmap(glyphs: &BTreeMap<u16, char>) -> String {
+    let mut s = String::from(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\n\
+         begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         /CMapType 2 def\n\
+         1 begincodespacerange\n\
+         <0000> <FFFF>\n\
+         endcodespacerange\n",
+    );
+    let entries: Vec<(u16, char)> = glyphs.iter().map(|(&g, &c)| (g, c)).collect();
+    for chunk in entries.chunks(100) {
+        let _ = writeln!(s, "{} beginbfchar", chunk.len());
+        for &(gid, ch) in chunk {
+            let mut buf = [0u16; 2];
+            let units = ch.encode_utf16(&mut buf);
+            let _ = write!(s, "<{gid:04X}> <");
+            for u in units.iter() {
+                let _ = write!(s, "{u:04X}");
+            }
+            s.push_str(">\n");
+        }
+        s.push_str("endbfchar\n");
+    }
+    s.push_str(
+        "endcmap\n\
+         CMapName currentdict /CMap defineresource pop\n\
+         end\n\
+         end",
+    );
+    s
+}
+
 impl PdfDoc {
     pub fn new() -> PdfDoc {
         PdfDoc::default()
@@ -583,7 +657,15 @@ impl PdfDoc {
     pub fn add_page(&mut self, width_pt: f32, height_pt: f32) -> &mut Page {
         let width = if width_pt.is_finite() { width_pt.clamp(3.0, 14_400.0) } else { 612.0 };
         let height = if height_pt.is_finite() { height_pt.clamp(3.0, 14_400.0) } else { 792.0 };
-        self.pages.push(Page { width, height, content: String::new(), fonts: [false; 12], images: Vec::new(), depth: 0 });
+        self.pages.push(Page {
+            width,
+            height,
+            content: String::new(),
+            fonts: [false; 12],
+            unicode_glyphs: BTreeMap::new(),
+            images: Vec::new(),
+            depth: 0,
+        });
         let i = self.pages.len() - 1;
         &mut self.pages[i]
     }
@@ -604,9 +686,13 @@ impl PdfDoc {
         }
         // Object numbering: 1 catalog, 2 page tree, 3 info, then fonts, then per page.
         let mut used = [false; 12];
+        let mut used_unicode: BTreeMap<u16, char> = BTreeMap::new();
         for p in &self.pages {
             for (u, f) in used.iter_mut().zip(p.fonts.iter()) {
                 *u |= *f;
+            }
+            for (&gid, &ch) in &p.unicode_glyphs {
+                used_unicode.entry(gid).or_insert(ch);
             }
         }
         let mut next = 4u32;
@@ -627,6 +713,59 @@ impl PdfDoc {
                 let enc = if name.starts_with("Symbol") { "" } else { " /Encoding /WinAnsiEncoding" };
                 objects.push((*id, format!("<< /Type /Font /Subtype /Type1 /BaseFont /{name}{enc} >>").into_bytes()));
             }
+        }
+        if !used_unicode.is_empty()
+            && let Some(ttf) = ttf::system_unicode_font()
+        {
+            let type0_id = next;
+            let cid_id = next + 1;
+            let desc_id = next + 2;
+            let file_id = next + 3;
+            let tounicode_id = next + 4;
+            next += 5;
+
+            let _ = write!(font_dict, "/FU {type0_id} 0 R ");
+
+            let mut w_arr = String::new();
+            for &gid in used_unicode.keys() {
+                let _ = write!(w_arr, "{gid} [{}] ", ttf.glyph_width_1000(gid));
+            }
+
+            let cmap_body = build_to_unicode_cmap(&used_unicode);
+            let mut cmap_obj = format!("<< /Length {} >>\nstream\n", cmap_body.len()).into_bytes();
+            cmap_obj.extend_from_slice(cmap_body.as_bytes());
+            cmap_obj.extend_from_slice(b"\nendstream");
+            objects.push((tounicode_id, cmap_obj));
+
+            let mut file_obj = format!("<< /Length {} /Length1 {} >>\nstream\n", ttf.data.len(), ttf.data.len()).into_bytes();
+            file_obj.extend_from_slice(&ttf.data);
+            file_obj.extend_from_slice(b"\nendstream");
+            objects.push((file_id, file_obj));
+
+            objects.push((
+                desc_id,
+                format!(
+                    "<< /Type /FontDescriptor /FontName /GridCraftUnicode /Flags 32 /FontBBox [{} {} {} {}] /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight 700 /StemV 80 /FontFile2 {file_id} 0 R >>",
+                    ttf.bbox[0], ttf.bbox[1], ttf.bbox[2], ttf.bbox[3], ttf.ascent, ttf.descent
+                )
+                .into_bytes(),
+            ));
+
+            objects.push((
+                cid_id,
+                format!(
+                    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GridCraftUnicode /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {desc_id} 0 R /DW 600 /W [{w_arr}] /CIDToGIDMap /Identity >>"
+                )
+                .into_bytes(),
+            ));
+
+            objects.push((
+                type0_id,
+                format!(
+                    "<< /Type /Font /Subtype /Type0 /BaseFont /GridCraftUnicode /Encoding /Identity-H /DescendantFonts [{cid_id} 0 R] /ToUnicode {tounicode_id} 0 R >>"
+                )
+                .into_bytes(),
+            ));
         }
         for page in &mut self.pages {
             while page.depth > 0 {

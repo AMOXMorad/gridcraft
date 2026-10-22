@@ -128,22 +128,24 @@ impl SheetLayout {
 #[derive(Clone, Debug, Default)]
 pub struct PrintOptions {
     pub all_sheets: bool,
+    pub selection_only: bool,
     pub range: Option<RangeRef>,
     pub fit_to_page: Option<bool>,
 }
 
 impl PrintOptions {
     fn from_params(p: &Json, cmd: &str) -> Result<PrintOptions> {
-        let all_sheets = match str_param(p, "sheets") {
-            None | Some("active") => false,
-            Some("all") | Some("workbook") => true,
-            Some(other) => return Err(bad(cmd, format!("`sheets` must be active or all, not `{other}`"))),
+        let (all_sheets, selection_only) = match str_param(p, "sheets") {
+            None | Some("active") => (false, false),
+            Some("all") | Some("workbook") => (true, false),
+            Some("selection") => (false, true),
+            Some(other) => return Err(bad(cmd, format!("`sheets` must be active, all, or selection, not `{other}`"))),
         };
         let range = match str_param(p, "range").map(str::trim).filter(|r| !r.is_empty()) {
             Some(r) => Some(RangeRef::parse(split_sheet(r).1).ok_or_else(|| bad(cmd, format!("not a range: `{r}`")))?),
             None => None,
         };
-        Ok(PrintOptions { all_sheets, range, fit_to_page: bool_param(p, "fitToPage") })
+        Ok(PrintOptions { all_sheets, selection_only, range, fit_to_page: bool_param(p, "fitToPage") })
     }
 }
 
@@ -747,7 +749,8 @@ fn draw_prims(pg: &mut Page, prims: &[gridcraft_chart::Prim], xf: Xf) {
             Prim::Text { x, y, text, size, color, bold, align, valign, rotation } => {
                 let font = if *bold { Font::HelveticaBold } else { Font::Helvetica };
                 let size = size * k;
-                let w = gridcraft_pdf::text_width(font, size, text);
+                let shaped = gridcraft_core::shape_bidi_visual(text);
+                let w = gridcraft_pdf::text_width(font, size, &shaped);
                 let dx = match align {
                     H::Left => 0.0,
                     H::Center => -w / 2.0,
@@ -760,7 +763,7 @@ fn draw_prims(pg: &mut Page, prims: &[gridcraft_chart::Prim], xf: Xf) {
                 };
                 let (sn, cs) = if rotation.is_finite() { rotation.sin_cos() } else { (0.0, 1.0) };
                 let (ax, ay) = xf.p(*x, *y);
-                pg.text_rotated(ax + dx * cs - dy * sn, ay + dx * sn + dy * cs, size, font, blend(*color), text, *rotation);
+                pg.text_rotated(ax + dx * cs - dy * sn, ay + dx * sn + dy * cs, size, font, blend(*color), &shaped, *rotation);
             }
         }
     }
@@ -770,23 +773,24 @@ const PAD_PX: f32 = 2.0;
 
 /// Word-wraps `text` to `width` points.
 fn wrap_lines(text: &str, font: Font, size: f32, width: f32) -> Vec<String> {
+    let measure = |s: &str| gridcraft_pdf::text_width(font, size, &gridcraft_core::shape_bidi_visual(s));
     let mut out = Vec::new();
     for para in text.split('\n') {
         let mut line = String::new();
         for word in para.split(' ') {
             let cand = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if line.is_empty() || gridcraft_pdf::text_width(font, size, &cand) <= width {
+            if line.is_empty() || measure(&cand) <= width {
                 line = cand;
             } else {
                 out.push(std::mem::take(&mut line));
                 line = word.to_string();
             }
             // Break a single over-long word by characters.
-            while gridcraft_pdf::text_width(font, size, &line) > width && line.chars().count() > 1 {
+            while measure(&line) > width && line.chars().count() > 1 {
                 let mut cut = String::new();
                 let mut rest = String::new();
                 for ch in line.chars() {
-                    if rest.is_empty() && gridcraft_pdf::text_width(font, size, &format!("{cut}{ch}")) <= width || cut.is_empty() {
+                    if rest.is_empty() && measure(&format!("{cut}{ch}")) <= width || cut.is_empty() {
                         cut.push(ch);
                     } else {
                         rest.push(ch);
@@ -1089,22 +1093,26 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     if text.is_empty() {
         return;
     }
-    let mut tw = gridcraft_pdf::text_width(font, size, &text);
+    let shaped_full = gridcraft_core::shape_bidi_visual(&text);
+    let mut tw = gridcraft_pdf::text_width(font, size, &shaped_full);
     if st.align.shrink && !wrap && tw > avail && tw > 0.0 {
         size = (size * avail / tw).max(1.0);
-        tw = gridcraft_pdf::text_width(font, size, &text);
+        tw = gridcraft_pdf::text_width(font, size, &shaped_full);
     }
     if is_num && !wrap && tw > avail + 0.01 && !sh.show_formulas {
         let hash = gridcraft_pdf::text_width(font, size, "#").max(0.1);
         text = "#".repeat(((avail / hash).floor().max(1.0) as usize).min(255));
         tw = gridcraft_pdf::text_width(font, size, &text);
     }
+    let is_rtl_cell = sh.right_to_left || gridcraft_core::detect_direction(&text) == gridcraft_core::TextDirection::Rtl;
     let h_align = match st.align.h {
         HAlign::General => {
             if is_num {
                 HAlign::Right
             } else if matches!(v, Value::Bool(_) | Value::Error(_)) {
                 HAlign::Center
+            } else if is_rtl_cell {
+                HAlign::Right
             } else {
                 HAlign::Left
             }
@@ -1116,12 +1124,13 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     let rot = st.align.rotation;
     let rotated = rot != 0 && rot != 255;
     // Rotated text wraps along its own direction: upright (±90°) text to the row height.
-    let lines: Vec<String> = match (wrap, rotated) {
+    let raw_lines: Vec<String> = match (wrap, rotated) {
         (true, false) => wrap_lines(&text, font, size, avail.max(size)),
         (true, true) if rot.abs() == 90 => wrap_lines(&text, font, size, (h - 2.0 * pad).max(size)),
         (true, true) => vec![text.lines().next().unwrap_or_default().to_string()],
         (false, _) => vec![text],
     };
+    let lines: Vec<String> = raw_lines.into_iter().map(|l| gridcraft_core::shape_bidi_visual(&l).into_owned()).collect();
     let line_h = size * 1.2;
     let n = lines.len().max(1) as f32;
     let first_baseline = match st.align.v {
@@ -1410,14 +1419,15 @@ fn draw_header_footer(pg: &mut Page, lay: &SheetLayout, which: gridcraft_model::
             let lines: Vec<&str> = sec.text.split('\n').take(20).collect();
             let n = lines.len() as f32;
             for (j, line) in lines.iter().enumerate() {
-                let lw = gridcraft_pdf::text_width(font, size, line);
+                let shaped = gridcraft_core::shape_bidi_visual(line);
+                let lw = gridcraft_pdf::text_width(font, size, &shaped);
                 let x = match i {
                     0 => l,
                     1 => (pw - lw) / 2.0,
                     _ => pw - r - lw,
                 };
                 let y = if header { hm + size * 0.8 + j as f32 * size * 1.2 } else { ph - fm - size * 0.22 - (n - 1.0 - j as f32) * size * 1.2 };
-                pg.text(x, y, size, font, [0, 0, 0], line);
+                pg.text(x, y, size, font, [0, 0, 0], &shaped);
             }
         }
     }
@@ -1526,8 +1536,11 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
 // ---------------------------------------------------------------- commands
 
 fn build_pdf(s: &Session, p: &Json, cmd: &str) -> Result<(Vec<u8>, usize)> {
-    let opts = PrintOptions::from_params(p, cmd)?;
+    let mut opts = PrintOptions::from_params(p, cmd)?;
     let d = s.doc()?;
+    if opts.selection_only && opts.range.is_none() {
+        opts.range = Some(d.selection.bounds());
+    }
     let lays = layouts(&d.wb, &opts);
     let path = d.path.clone().unwrap_or_default();
     Ok(render_pdf(&d.wb, &lays, &d.display_title(), &path))
@@ -1555,8 +1568,11 @@ fn print(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 fn print_preview(s: &mut Session, p: &Json) -> Result<Json> {
-    let opts = PrintOptions::from_params(p, "file.printPreview")?;
+    let mut opts = PrintOptions::from_params(p, "file.printPreview")?;
     let d = s.doc()?;
+    if opts.selection_only && opts.range.is_none() {
+        opts.range = Some(d.selection.bounds());
+    }
     let lays = layouts(&d.wb, &opts);
     let mut list = Vec::new();
     let mut n = 0usize;
@@ -2163,5 +2179,22 @@ mod tests {
         // Every piece of both headers is rotated, each wrapped along the row height into a few long lines.
         assert_eq!(up + down, blocks.len(), "a header line printed flat: {blocks:?}");
         assert!((1..=3).contains(&up) && (1..=3).contains(&down), "up {up}, down {down}: {blocks:?}");
+    }
+
+    #[test]
+    fn print_selection_and_arabic_pdf_embeds_unicode_font_without_question_marks() {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A1", "input": "خالد"})).unwrap();
+        s.execute("cell.set", json!({"cell": "B2", "input": "مرحبا بالعالم"})).unwrap();
+        s.execute("cell.set", json!({"cell": "D5", "input": "Out of selection"})).unwrap();
+        s.execute("selection.set", json!({"range": "A1:B2"})).unwrap();
+        let pv = s.execute("file.printPreview", json!({"sheets": "selection"})).unwrap();
+        assert_eq!(pv["pageList"][0]["range"], "A1:B2");
+        let (pdf, pages) = pdf_of(&mut s, json!({"sheets": "selection"}));
+        assert_eq!(pages, 1);
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(!text.contains("(Out of selection) Tj"), "selection print should exclude D5");
+        assert!(!text.contains("(????) Tj"), "Arabic must not be replaced by question marks");
+        assert!(text.contains("/Subtype /Type0") && text.contains("/Identity-H"), "Arabic PDF should embed Type0 Identity-H font");
     }
 }

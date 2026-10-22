@@ -411,6 +411,7 @@ fn translate_logical(text: &str) -> Option<&'static str> {
         "Save the workbook under another name or in another folder." => "حفظ المصنف باسم آخر أو في مجلد آخر.",
         "Print Active Sheets" => "طباعة الأوراق النشطة",
         "Print Entire Workbook" => "طباعة المصنف بأكمله",
+        "Print Selection" => "طباعة التحديد",
         "Fit Sheet on One Page" => "احتواء الورقة على صفحة واحدة",
         "Page Setup…" => "إعداد الصفحة…",
         "Page {page} of {pages}" => "صفحة {page} من {pages}",

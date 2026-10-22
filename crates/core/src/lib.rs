@@ -11,5 +11,5 @@ pub mod value;
 
 pub use addr::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, col_to_letters, letters_to_col};
 pub use date::DateSystem;
-pub use text_direction::{TextDirection, contains_rtl, detect_direction, shape_arabic_logical, shape_bidi};
+pub use text_direction::{TextDirection, contains_rtl, detect_direction, shape_arabic_logical, shape_bidi, shape_bidi_visual};
 pub use value::{Array, CellError, Value, compare, compare_numbers, compare_text, number_to_text, sort_compare};

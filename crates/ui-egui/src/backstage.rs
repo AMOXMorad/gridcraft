@@ -106,12 +106,14 @@ pub struct Backstage {
     props: [String; 6],
     /// Print: the whole workbook rather than the active sheet.
     pub print_all: bool,
+    /// Print: only the currently selected range.
+    pub print_selection: bool,
     /// Print: fit each sheet on one page.
     pub fit_to_page: bool,
     /// Print: the previewed page (0-based).
     preview_page: usize,
-    /// Print: the preview for (document, revision, whole workbook, fit to page).
-    preview: Option<((u64, u64, bool, bool), Json)>,
+    /// Print: the preview for (document, revision, whole workbook, selection only, fit to page, selection bounds).
+    preview: Option<((u64, u64, bool, bool, bool, gridcraft_engine::core::RangeRef), Json)>,
     /// Save As: the chosen file type (an extension from [`SAVE_TYPES`]).
     pub save_format: &'static str,
     /// Home and Open: when the recent workbooks were last changed.
@@ -129,6 +131,7 @@ impl Backstage {
             page,
             props: Default::default(),
             print_all: false,
+            print_selection: false,
             fit_to_page: false,
             preview_page: 0,
             preview: None,
@@ -691,15 +694,22 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
 fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcome) {
     let t = Tokens::get(ui.ctx());
     let lang = app.ui.language;
-    let Some((uid, revision)) = app.session.active().map(|d| (d.uid, d.revision)) else {
+    let Some((uid, revision, sel_bounds)) = app.session.active().map(|d| (d.uid, d.revision, d.selection.bounds())) else {
         dim(ui, lang.tr("No workbook is open."));
         return;
     };
-    let mut params = json!({"sheets": if bs.print_all { "all" } else { "active" }});
+    let sheets_mode = if bs.print_selection {
+        "selection"
+    } else if bs.print_all {
+        "all"
+    } else {
+        "active"
+    };
+    let mut params = json!({"sheets": sheets_mode});
     if bs.fit_to_page {
         params["fitToPage"] = json!(true);
     }
-    let key = (uid, revision, bs.print_all, bs.fit_to_page);
+    let key = (uid, revision, bs.print_all, bs.print_selection, bs.fit_to_page, sel_bounds);
     if bs.preview.as_ref().is_none_or(|(k, _)| *k != key) {
         let preview = app.session.run("file.printPreview", params.clone()).unwrap_or(Json::Null);
         bs.preview = Some((key, preview));
@@ -719,11 +729,22 @@ fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcome)
                 out.close = app.services.print_native.is_none();
             }
             ui.add_space(16.0);
-            let scope = if bs.print_all { "Print Entire Workbook" } else { "Print Active Sheets" };
+            let scope = if bs.print_selection {
+                "Print Selection"
+            } else if bs.print_all {
+                "Print Entire Workbook"
+            } else {
+                "Print Active Sheets"
+            };
             egui::ComboBox::from_id_salt("backstage_print_scope").width(230.0).selected_text(lang.tr(scope)).show_ui(ui, |ui| {
-                for (all, label) in [(false, "Print Active Sheets"), (true, "Print Entire Workbook")] {
-                    if ui.selectable_label(bs.print_all == all, lang.tr(label)).clicked() {
+                for (all, sel, label) in [
+                    (false, false, "Print Active Sheets"),
+                    (true, false, "Print Entire Workbook"),
+                    (false, true, "Print Selection"),
+                ] {
+                    if ui.selectable_label(bs.print_all == all && bs.print_selection == sel, lang.tr(label)).clicked() {
                         bs.print_all = all;
+                        bs.print_selection = sel;
                         bs.preview_page = 0;
                     }
                 }
@@ -828,6 +849,8 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
             let text = gridcraft_engine::display::cell_text(wb, sh, cell);
             if !text.is_empty() {
                 let numeric = sh.value(cell).as_f64().is_some();
+                let is_rtl = sh.right_to_left
+                    || gridcraft_engine::core::detect_direction(&text) == gridcraft_engine::core::TextDirection::Rtl;
                 // Text runs on over empty neighbours, as on the sheet; numbers stay in their cell.
                 let mut span = w;
                 if !numeric {
@@ -838,9 +861,13 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
                     }
                 }
                 let clip = Rect::from_min_size(pos2(x, y), vec2(span, h)).intersect(body);
-                let (anchor, at) =
-                    if numeric { (Align2::RIGHT_CENTER, pos2(x + w - 1.0, y + h / 2.0)) } else { (Align2::LEFT_CENTER, pos2(x + 1.0, y + h / 2.0)) };
-                p.with_clip_rect(clip).text(at, anchor, text, font.clone(), t.cell_text);
+                let (anchor, at) = if numeric || is_rtl {
+                    (Align2::RIGHT_CENTER, pos2(x + w - 1.0, y + h / 2.0))
+                } else {
+                    (Align2::LEFT_CENTER, pos2(x + 1.0, y + h / 2.0))
+                };
+                let shaped = gridcraft_engine::core::shape_bidi(&text);
+                p.with_clip_rect(clip).text(at, anchor, shaped, font.clone(), t.cell_text);
             }
             x += w;
         }
