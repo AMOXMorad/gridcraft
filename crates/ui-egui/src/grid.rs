@@ -3678,4 +3678,14 @@ mod outline_band_tests {
         assert!(outline_bands(Rect::from_min_max(pos2(900.0, 0.0), pos2(950.0, 20.0)), 2.0, clip).is_empty());
         assert!(outline_bands(Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(1.0, 1.0)), 2.0, clip).is_empty());
     }
+
+    #[test]
+    fn arabic_cell_text_detects_rtl_and_shapes_connected_glyphs() {
+        let text = "مرحبا 123";
+        let effective_dir = detect_direction(text);
+        assert_eq!(effective_dir, TextDirection::Rtl);
+        let shaped = shape_bidi(text);
+        assert!(shaped.starts_with("123 "));
+        assert!(shaped.contains('\u{FEE3}'));
+    }
 }

@@ -57,7 +57,7 @@ impl Language {
             Self::Cs => "Čeština",
             Self::Fr => "Français",
             Self::Sr => "Srpski",
-            Self::Ar => "العربية",
+            Self::Ar => ar::shape_static("العربية"),
         }
     }
 
@@ -652,10 +652,10 @@ mod tests {
         assert_eq!(Language::Sr.tr("Sheet1!A1"), "Sheet1!A1");
         assert_eq!(Language::Sr.tr("Page Layout|Orientation"), "Orijentacija");
         assert_eq!(Language::Sr.tr("Orientation"), "Orijentacija");
-        assert_eq!(Language::Ar.tr("Data"), "بيانات");
+        assert_eq!(Language::Ar.tr("Data"), ar::shape_static("بيانات"));
         assert_eq!(Language::Ar.tr("Sheet1!A1"), "Sheet1!A1");
-        assert_eq!(Language::Ar.tr("Page Layout|Orientation"), "اتجاه الصفحة");
-        assert_eq!(Language::Ar.tr("Orientation"), "الاتجاه");
+        assert_eq!(Language::Ar.tr("Page Layout|Orientation"), ar::shape_static("اتجاه الصفحة"));
+        assert_eq!(Language::Ar.tr("Orientation"), ar::shape_static("الاتجاه"));
         assert_eq!(Language::parse("xx"), None);
     }
 

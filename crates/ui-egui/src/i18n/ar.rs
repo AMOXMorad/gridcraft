@@ -1,6 +1,30 @@
 //! Arabic translations for the interface strings in i18n.rs.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Shapes a static logical Arabic string into contextual Presentation Forms and visual BiDi order
+/// for `egui` rendering, caching the leaked `'static` slice so each UI string is shaped at most once.
+pub(super) fn shape_static(logical: &'static str) -> &'static str {
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mutex = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&shaped) = map.get(logical) {
+        return shaped;
+    }
+    let shaped: &'static str = match gridcraft_engine::core::shape_bidi(logical) {
+        std::borrow::Cow::Borrowed(s) => s,
+        std::borrow::Cow::Owned(s) => Box::leak(s.into_boxed_str()),
+    };
+    map.insert(logical, shaped);
+    shaped
+}
+
 pub(super) fn translate(text: &str) -> Option<&'static str> {
+    translate_logical(text).map(shape_static)
+}
+
+fn translate_logical(text: &str) -> Option<&'static str> {
     Some(match text {
         "Different First Page" => "صفحة أولى مختلفة",
         "Different Odd & Even Pages" => "صفحات فردية وزوجية مختلفة",

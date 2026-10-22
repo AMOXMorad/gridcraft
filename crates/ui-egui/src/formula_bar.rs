@@ -44,7 +44,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                     editor_widget(app, &mut child, id, theme::ui_font(13.0), expanded, field.width() - 12.0);
                 } else {
                     // Show the active cell's content; clicking starts editing in the bar.
-                    let text = active_input(app);
+                    let text = gridcraft_engine::core::shape_bidi(&active_input(app)).into_owned();
                     let resp = child
                         .add(egui::Label::new(egui::RichText::new(text).font(theme::ui_font(13.0)).color(t.text)).truncate().sense(Sense::click()));
                     let click = child.interact(field, id.with("click"), Sense::click());

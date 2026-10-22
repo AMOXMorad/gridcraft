@@ -156,12 +156,18 @@ fn arabic_forms(ch: char) -> Option<ArabicForms> {
         '\u{0649}' => right_forms('\u{FEEF}', '\u{FEF0}'),                        // ى
         '\u{064A}' => dual_forms('\u{FEF1}', '\u{FEF2}', '\u{FEF3}', '\u{FEF4}'), // ي
         // Persian / Urdu extensions
+        '\u{0679}' => dual_forms('\u{FB66}', '\u{FB67}', '\u{FB68}', '\u{FB69}'), // ٹ
         '\u{067E}' => dual_forms('\u{FB56}', '\u{FB57}', '\u{FB58}', '\u{FB59}'), // پ
         '\u{0686}' => dual_forms('\u{FB7A}', '\u{FB7B}', '\u{FB7C}', '\u{FB7D}'), // چ
+        '\u{0688}' => right_forms('\u{FB88}', '\u{FB89}'),                        // ڈ
+        '\u{0691}' => right_forms('\u{FB8C}', '\u{FB8D}'),                        // ڑ
         '\u{0698}' => right_forms('\u{FB8A}', '\u{FB8B}'),                        // ژ
         '\u{06A9}' => dual_forms('\u{FB8E}', '\u{FB8F}', '\u{FB90}', '\u{FB91}'), // ک
         '\u{06AF}' => dual_forms('\u{FB92}', '\u{FB93}', '\u{FB94}', '\u{FB95}'), // گ
+        '\u{06BA}' => right_forms('\u{FB9E}', '\u{FB9F}'),                        // ں
+        '\u{06C1}' => dual_forms('\u{FBA6}', '\u{FBA7}', '\u{FBA8}', '\u{FBA9}'), // ہ
         '\u{06CC}' => dual_forms('\u{FBFC}', '\u{FBFD}', '\u{FBFE}', '\u{FBFF}'), // ی
+        '\u{06D2}' => right_forms('\u{FBAE}', '\u{FBAF}'),                        // ے
         _ if is_arabic_diacritic(ch) => ArabicForms { isolated: ch, final_form: ch, initial: ch, medial: ch, joining: Joining::Transparent },
         _ => return None,
     })
@@ -316,12 +322,16 @@ fn reorder_line_visual(shaped_line: &str, out: &mut String) {
             BidiClass::L | BidiClass::En => dirs[i] = RunDir::Ltr,
             BidiClass::R | BidiClass::Al => dirs[i] = RunDir::Rtl,
             BidiClass::Other => {
-                // Keep numeric separators (.,+-/:%) inside an LTR number/word run if flanked by LTR
+                // Keep numeric separators (.,+-/:%) and template braces ({n}, {page}) inside an LTR run
                 if matches!(ch, '.' | ',' | ':' | '/' | '-' | '+')
                     && i > 0
                     && dirs[i - 1] == RunDir::Ltr
                     && chars.get(i + 1).is_some_and(|&next| matches!(bidi_class(next), BidiClass::L | BidiClass::En))
                 {
+                    dirs[i] = RunDir::Ltr;
+                } else if ch == '{' && chars.get(i + 1).is_some_and(|&next| matches!(bidi_class(next), BidiClass::L | BidiClass::En)) {
+                    dirs[i] = RunDir::Ltr;
+                } else if ch == '}' && i > 0 && dirs[i - 1] == RunDir::Ltr {
                     dirs[i] = RunDir::Ltr;
                 }
             }
