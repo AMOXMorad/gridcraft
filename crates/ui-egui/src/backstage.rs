@@ -114,8 +114,10 @@ pub struct Backstage {
     preview_page: usize,
     /// Print: the preview for (document, revision, whole workbook, selection only, fit to page, selection bounds).
     preview: Option<((u64, u64, bool, bool, bool, gridcraft_engine::core::RangeRef), Json)>,
-    /// Save As: the chosen file type (an extension from [`SAVE_TYPES`]).
+    /// Save As / Export: the chosen file type (an extension from [`SAVE_TYPES`]).
     pub save_format: &'static str,
+    /// Save As / Export: save only the currently selected range instead of the whole workbook/sheet.
+    pub save_selection: bool,
     /// Home and Open: when the recent workbooks were last changed.
     recent: RecentFiles,
 }
@@ -136,6 +138,7 @@ impl Backstage {
             preview_page: 0,
             preview: None,
             save_format: "xlsx",
+            save_selection: false,
             recent: RecentFiles::default(),
         }
     }
@@ -212,7 +215,7 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                     Page::Info => info(app, ui, &mut bs),
                     Page::SaveAs => save_as(app, ui, &mut bs, &mut out),
                     Page::Print => print(app, ui, &mut bs, &mut out),
-                    Page::Export => export(app, ui, &mut out),
+                    Page::Export => export(app, ui, &mut bs, &mut out),
                     Page::Options => options(app, ui),
                 }
             });
@@ -655,6 +658,20 @@ fn info(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage) {
     });
 }
 
+fn save_scope_combo(ui: &mut Ui, lang: crate::i18n::Language, save_selection: &mut bool, salt: &str) {
+    let scope_label = if *save_selection { "Save Selection Only" } else { "Save Entire Workbook" };
+    ui.horizontal(|ui| {
+        ui.label(lang.tr("Save scope"));
+        egui::ComboBox::from_id_salt(salt).width(280.0).selected_text(lang.tr(scope_label)).show_ui(ui, |ui| {
+            for (sel, label) in [(false, "Save Entire Workbook"), (true, "Save Selection Only")] {
+                if ui.selectable_label(*save_selection == sel, lang.tr(label)).clicked() {
+                    *save_selection = sel;
+                }
+            }
+        });
+    });
+}
+
 fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcome) {
     let lang = app.ui.language;
     dim(ui, lang.tr("Save the workbook under another name or in another folder."));
@@ -671,6 +688,8 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
             }
         });
     });
+    ui.add_space(10.0);
+    save_scope_combo(ui, lang, &mut bs.save_selection, "backstage_save_scope");
     ui.add_space(14.0);
     // Desktop: the system Save dialog. Web: the file downloads.
     let web = app.services.pick_save.is_none() && app.services.download.is_some();
@@ -678,12 +697,12 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
     if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
         if fmt == "xlsx" {
             let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
-            app.open_dialog("saveAs", json!({}));
+            app.open_dialog("saveAs", json!({"selection": bs.save_selection}));
             let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
-            if after != before || app.services.pick_save.is_none() {
+            if after != before || bs.save_selection || app.services.pick_save.is_none() {
                 out.close = true;
             }
-        } else if export_as(app, fmt) {
+        } else if export_as_scope(app, fmt, bs.save_selection) {
             out.close = true;
         }
     }
@@ -875,10 +894,12 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
     }
 }
 
-fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
+fn export(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcome) {
     let lang = app.ui.language;
+    save_scope_combo(ui, lang, &mut bs.save_selection, "backstage_export_scope");
+    ui.add_space(14.0);
     if action_row(ui, Icon::Paper, lang.tr("Create PDF"), lang.tr("Save the sheet as a PDF document that keeps its page layout.")).clicked()
-        && export_as(app, "pdf")
+        && export_as_scope(app, "pdf", bs.save_selection)
     {
         out.close = true;
     }
@@ -888,7 +909,7 @@ fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
         ("csv", Icon::TextColumns, "CSV (Comma delimited)", "Save the active sheet as comma-separated text."),
         ("html", Icon::Link, "Web Page (.html)", "Save the workbook as a web page."),
     ] {
-        if action_row(ui, icon, lang.tr(title), lang.tr(detail)).clicked() && export_as(app, fmt) {
+        if action_row(ui, icon, lang.tr(title), lang.tr(detail)).clicked() && export_as_scope(app, fmt, bs.save_selection) {
             out.close = true;
         }
     }
@@ -897,6 +918,11 @@ fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
 /// Exports the active workbook as `pdf`, `csv` or `html`: through the save picker on the desktop,
 /// as a browser download on the web. Returns whether a file was written or handed over.
 pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
+    export_as_scope(app, fmt, false)
+}
+
+/// [`export_as`] with an option to export only the currently selected range.
+pub fn export_as_scope(app: &mut SheetApp, fmt: &str, selection_only: bool) -> bool {
     if !app.commit_edit(0, 0, false, false) {
         return false;
     }
@@ -908,11 +934,17 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
     };
     let title = app.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
     let stem = std::path::Path::new(&title).file_stem().and_then(|s| s.to_str()).unwrap_or("Book1").to_string();
+    let mut cmd_params = if selection_only {
+        if fmt == "pdf" { json!({"sheets": "selection"}) } else { json!({"selection": true}) }
+    } else {
+        json!({})
+    };
     if let Some(pick) = &app.services.pick_save {
         let Some(path) = pick(&format!("{stem}.{fmt}")) else { return false };
         // The picker may suggest a workbook extension; the export writes the chosen format.
         let path = std::path::Path::new(&path).with_extension(fmt).to_string_lossy().into_owned();
-        return match app.run(id, json!({"path": path})) {
+        cmd_params["path"] = json!(path);
+        return match app.run(id, cmd_params) {
             Ok(_) => true,
             Err(e) => {
                 app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
@@ -926,7 +958,7 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
     }
     if fmt == "pdf" {
         // Without a path the PDF comes back as bytes, which `SheetApp::run` hands to the browser.
-        return match app.run(id, json!({})) {
+        return match app.run(id, cmd_params) {
             Ok(_) => true,
             Err(e) => {
                 app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
@@ -935,7 +967,7 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         };
     }
     app.store_view_state();
-    match app.session.run("file.saveBytes", json!({"format": fmt})) {
+    match app.session.run("file.saveBytes", json!({"format": fmt, "selection": selection_only})) {
         Ok(r) => {
             let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
             let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);

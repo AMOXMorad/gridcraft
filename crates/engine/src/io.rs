@@ -228,6 +228,46 @@ pub fn source_dir(path: &str) -> Option<std::path::PathBuf> {
     std::path::absolute(path).ok()?.parent().map(std::path::Path::to_path_buf)
 }
 
+/// Builds a copy of `wb` containing only the cells, merges, and annotations inside `range` of `sheet_idx`.
+pub fn workbook_selection(wb: &Workbook, sheet_idx: usize, range: RangeRef) -> Workbook {
+    let mut out = wb.clone();
+    let Some(orig_sh) = wb.sheet(sheet_idx) else {
+        return out;
+    };
+    let mut sh = orig_sh.clone();
+    let mut new_cells = gridcraft_model::CellStore::new();
+    for (c, cell) in orig_sh.cells.iter_range(range) {
+        let mut cell = cell.clone();
+        if cell.formula.is_some() {
+            cell.value = orig_sh.value(c);
+            cell.formula = None;
+        }
+        new_cells.set(c, cell);
+    }
+    for (&c, val) in &orig_sh.spill {
+        if range.contains(c) && new_cells.get(c).is_none() {
+            let cell = gridcraft_model::Cell { value: val.clone(), ..Default::default() };
+            new_cells.set(c, cell);
+        }
+    }
+    sh.cells = new_cells;
+    sh.cell_pictures.retain(|c, _| range.contains(*c));
+    sh.merges.retain(|m| range.contains(m.start) && range.contains(m.end));
+    sh.comments.retain(|c, _| range.contains(*c));
+    sh.hyperlinks.retain(|c, _| range.contains(*c));
+    sh.tables.retain(|t| range.contains(t.range.start) && range.contains(t.range.end));
+    sh.charts.clear();
+    sh.images.clear();
+    sh.shapes.clear();
+    sh.sparklines.clear();
+    sh.slicers.clear();
+    sh.pivots.clear();
+    sh.print.print_area = None;
+    out.sheets = vec![std::sync::Arc::new(sh)];
+    out.active_sheet = 0;
+    out
+}
+
 /// Save As CSV/Text writes "the text and values as they are displayed in cells" with "all
 /// characters in each cell" (Microsoft Support, *Excel formatting and features that are not
 /// transferred to other file formats*): number formats applied, never column-width `#####`.
@@ -738,5 +778,23 @@ mod tests {
             let (opened, _) = open_bytes(name, b"a,b\n1,2\n").unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(opened.sheet(0).unwrap().value(CellRef::new(0, 1)), gridcraft_core::Value::text("b"), "{name}");
         }
+    }
+
+    #[test]
+    fn workbook_selection_keeps_only_selected_cells() {
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::text("Keep A1"));
+        sh.set_value(CellRef::new(1, 1), gridcraft_core::Value::Number(42.0));
+        sh.set_value(CellRef::new(4, 4), gridcraft_core::Value::text("Drop E5"));
+        let sel = workbook_selection(&wb, 0, RangeRef::parse("A1:B2").unwrap());
+        let csv = String::from_utf8(save_bytes(&sel, "sel.csv").unwrap()).unwrap();
+        assert_eq!(csv, "Keep A1,\r\n,42\r\n");
+        let xlsx = save_bytes(&sel, "sel.xlsx").unwrap();
+        let (reopened, _) = open_bytes("sel.xlsx", &xlsx).unwrap();
+        let rsh = reopened.sheet(0).unwrap();
+        assert_eq!(rsh.value(CellRef::new(0, 0)), gridcraft_core::Value::text("Keep A1"));
+        assert_eq!(rsh.value(CellRef::new(1, 1)), gridcraft_core::Value::Number(42.0));
+        assert!(rsh.value(CellRef::new(4, 4)).is_empty());
     }
 }

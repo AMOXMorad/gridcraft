@@ -724,14 +724,15 @@ impl SheetApp {
                 }
             }
             "saveAs" => {
+                let selection = params.get("selection").and_then(Json::as_bool).unwrap_or(false);
                 let suggested = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
                 if let Some(pick) = &self.services.pick_save {
                     if let Some(path) = pick(&suggested) {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
-                        self.run_or_alert("file.save", json!({"path": path}));
+                        self.run_or_alert("file.save", json!({"path": path, "selection": selection}));
                     }
                 } else if self.services.download.is_some()
-                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
+                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx", "selection": selection}))
                     && let Some(dl) = &self.services.download
                     && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
                 {

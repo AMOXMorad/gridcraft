@@ -96,41 +96,52 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     )
 }
 
+fn is_selection_only(p: &Json) -> bool {
+    bool_param(p, "selection").unwrap_or(false) || str_param(p, "sheets") == Some("selection")
+}
+
 fn save(s: &mut Session, p: &Json) -> Result<Json> {
-    let path = match str_param(p, "path").map(str::to_string).or_else(|| s.active().and_then(|d| d.path.clone())) {
+    let selection_only = is_selection_only(p);
+    let path = match str_param(p, "path").map(str::to_string).or_else(|| if selection_only { None } else { s.active().and_then(|d| d.path.clone()) }) {
         Some(p) => p,
         None => {
-            s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({})));
+            s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({"selection": selection_only})));
             return ok();
         }
     };
     // A PDF is a print of the sheet (Page Setup applies), not a copy of the workbook: the
     // document keeps its file and its unsaved changes.
     if std::path::Path::new(&path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
-        return super::print::export_pdf(s, &json!({"path": path}));
+        let mut pdf_params = json!({"path": path});
+        if selection_only {
+            pdf_params["sheets"] = json!("selection");
+        }
+        return super::print::export_pdf(s, &pdf_params);
     }
     let d = s.doc_mut()?;
+    let sel_wb = selection_only.then(|| crate::io::workbook_selection(&d.wb, d.wb.active_sheet, d.selection.bounds()));
+    let base_wb: &Workbook = sel_wb.as_ref().unwrap_or(&d.wb);
     // The document's own file keeps the format its content had when opened; any other path
     // goes by its extension. Relative paths to linked workbooks are rewritten for the new folder.
-    let kind = crate::io::FileKind::from_path(&path).or(d.content_kind.filter(|_| d.path.as_deref() == Some(path.as_str())));
-    let rebased = crate::io::source_dir(&path).and_then(|f| gridcraft_xlsx::rebase_links(&d.wb, &f));
-    let wb = rebased.as_ref().unwrap_or(&d.wb);
+    let kind = crate::io::FileKind::from_path(&path).or(d.content_kind.filter(|_| !selection_only && d.path.as_deref() == Some(path.as_str())));
+    let rebased = crate::io::source_dir(&path).and_then(|f| gridcraft_xlsx::rebase_links(base_wb, &f));
+    let wb = rebased.as_ref().unwrap_or(base_wb);
     let bytes = match kind {
         Some(kind) => crate::io::save_bytes_as(wb, &path, kind)?,
         None => crate::io::save_bytes(wb, &path)?,
     };
     crate::io::write_file(&path, &bytes)?;
-    // Only a full-fidelity format clears the dirty flag and becomes the document's file.
-    if matches!(kind, Some(crate::io::FileKind::Xlsx | crate::io::FileKind::Json)) {
+    // Only a full-fidelity format of the entire workbook clears the dirty flag and becomes the document's file.
+    if !selection_only && matches!(kind, Some(crate::io::FileKind::Xlsx | crate::io::FileKind::Json)) {
         d.saved = d.wb.clone();
         d.path = Some(path.clone());
     }
-    Ok(json!({"path": path, "bytes": bytes.len()}))
+    Ok(json!({"path": path, "bytes": bytes.len(), "selection": selection_only}))
 }
 
 fn save_as(s: &mut Session, p: &Json) -> Result<Json> {
     if str_param(p, "path").is_none() {
-        s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({})));
+        s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({"selection": is_selection_only(p)})));
         return ok();
     }
     save(s, p)
@@ -138,10 +149,13 @@ fn save_as(s: &mut Session, p: &Json) -> Result<Json> {
 
 fn save_bytes(s: &mut Session, p: &Json) -> Result<Json> {
     let fmt = str_param(p, "format").unwrap_or("xlsx");
+    let selection_only = is_selection_only(p);
     let d = s.doc()?;
-    let bytes = crate::io::save_bytes(&d.wb, &format!("x.{fmt}"))?;
+    let sel_wb = selection_only.then(|| crate::io::workbook_selection(&d.wb, d.wb.active_sheet, d.selection.bounds()));
+    let wb: &Workbook = sel_wb.as_ref().unwrap_or(&d.wb);
+    let bytes = crate::io::save_bytes(wb, &format!("x.{fmt}"))?;
     let name = format!("{}.{fmt}", std::path::Path::new(&d.display_title()).file_stem().and_then(|x| x.to_str()).unwrap_or("Book"));
-    Ok(json!({"name": name, "base64": crate::io::base64_encode(&bytes), "bytes": bytes.len()}))
+    Ok(json!({"name": name, "base64": crate::io::base64_encode(&bytes), "bytes": bytes.len(), "selection": selection_only}))
 }
 
 fn close(s: &mut Session, p: &Json) -> Result<Json> {
@@ -158,15 +172,21 @@ fn close(s: &mut Session, p: &Json) -> Result<Json> {
 
 fn export(s: &mut Session, p: &Json, ext: &str) -> Result<Json> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.export", "missing `path`"))?.to_string();
+    let selection_only = is_selection_only(p);
+    let sheet = if p.get("sheet").is_some() { target_sheet(s, p)? } else { s.doc()?.wb.active_sheet };
     let d = s.doc()?;
-    let mut wb = (*d.wb).clone();
-    if p.get("sheet").is_some() {
-        wb.active_sheet = target_sheet(s, p)?;
+    let mut wb = if selection_only {
+        crate::io::workbook_selection(&d.wb, sheet, d.selection.bounds())
+    } else {
+        (*d.wb).clone()
+    };
+    if !selection_only && p.get("sheet").is_some() {
+        wb.active_sheet = sheet;
     }
     let target = if path.ends_with(&format!(".{ext}")) { path.clone() } else { format!("{path}.{ext}") };
     let bytes = crate::io::save_bytes(&wb, &target)?;
     crate::io::write_file(&target, &bytes)?;
-    Ok(json!({"path": target, "bytes": bytes.len()}))
+    Ok(json!({"path": target, "bytes": bytes.len(), "selection": selection_only}))
 }
 
 fn properties(s: &mut Session, p: &Json) -> Result<Json> {
