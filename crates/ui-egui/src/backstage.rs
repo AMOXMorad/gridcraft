@@ -855,13 +855,18 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
         if y >= body.bottom() {
             break;
         }
-        let mut x = body.left();
+        let mut x = if sh.right_to_left { body.right() } else { body.left() };
         for col in range.start.col..=last_col {
             let w = sh.col_width(col) * per_px;
             if w <= 0.0 {
                 continue;
             }
-            if x >= body.right() {
+            if sh.right_to_left {
+                if x <= body.left() {
+                    break;
+                }
+                x -= w;
+            } else if x >= body.right() {
                 break;
             }
             let cell = gridcraft_engine::core::CellRef::new(row, col);
@@ -872,14 +877,24 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
                     || gridcraft_engine::core::detect_direction(&text) == gridcraft_engine::core::TextDirection::Rtl;
                 // Text runs on over empty neighbours, as on the sheet; numbers stay in their cell.
                 let mut span = w;
+                let mut clip_x = x;
                 if !numeric {
                     let mut next = col.saturating_add(1);
-                    while next <= last_col && x + span < body.right() && sh.value(gridcraft_engine::core::CellRef::new(row, next)).is_empty() {
-                        span += sh.col_width(next) * per_px;
-                        next = next.saturating_add(1);
+                    if sh.right_to_left {
+                        while next <= last_col && clip_x > body.left() && sh.value(gridcraft_engine::core::CellRef::new(row, next)).is_empty() {
+                            let nw = sh.col_width(next) * per_px;
+                            span += nw;
+                            clip_x -= nw;
+                            next = next.saturating_add(1);
+                        }
+                    } else {
+                        while next <= last_col && x + span < body.right() && sh.value(gridcraft_engine::core::CellRef::new(row, next)).is_empty() {
+                            span += sh.col_width(next) * per_px;
+                            next = next.saturating_add(1);
+                        }
                     }
                 }
-                let clip = Rect::from_min_size(pos2(x, y), vec2(span, h)).intersect(body);
+                let clip = Rect::from_min_size(pos2(clip_x, y), vec2(span, h)).intersect(body);
                 let (anchor, at) = if numeric || is_rtl {
                     (Align2::RIGHT_CENTER, pos2(x + w - 1.0, y + h / 2.0))
                 } else {
@@ -888,7 +903,9 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
                 let shaped = gridcraft_engine::core::shape_bidi(&text);
                 p.with_clip_rect(clip).text(at, anchor, shaped, font.clone(), t.cell_text);
             }
-            x += w;
+            if !sh.right_to_left {
+                x += w;
+            }
         }
         y += h;
     }

@@ -401,9 +401,10 @@ const HTML_EXPORT_MAX_ROWS: u32 = 100_001;
 pub fn to_html(wb: &Workbook, sheet: usize) -> Result<String> {
     let Some(sh) = wb.sheet(sheet) else { return Ok(String::new()) };
     let mut out = String::new();
+    let dir_attr = if sh.right_to_left { " dir=\"rtl\"" } else { "" };
     let _ = write!(
         out,
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title><style>table{{border-collapse:collapse;font-family:Calibri,Carlito,Arial,sans-serif;font-size:11pt}}td{{border:1px solid #d4d4d4;padding:2px 4px;white-space:nowrap}}</style></head><body><table>",
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title><style>table{{border-collapse:collapse;font-family:Calibri,Carlito,Arial,sans-serif;font-size:11pt}}td{{border:1px solid #d4d4d4;padding:2px 4px;white-space:nowrap}}</style></head><body><table{dir_attr}>",
         esc(&sh.name)
     );
     if let Some(r) = sh.used_range() {

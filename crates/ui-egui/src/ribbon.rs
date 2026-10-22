@@ -115,10 +115,12 @@ pub fn title_bar(app: &mut SheetApp, ui: &mut Ui) {
             // Centered title.
             let title = app.session.active().map(|d| d.display_title()).unwrap_or_default();
             let dirty = app.session.active().is_some_and(|d| d.is_dirty());
+            let title_text = format!("{title}{}", if dirty { " •" } else { "" });
+            let shaped_title = gridcraft_engine::core::shape_bidi(&title_text);
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                format!("{title}{}", if dirty { " •" } else { "" }),
+                shaped_title,
                 theme::ui_bold(13.0),
                 t.text,
             );

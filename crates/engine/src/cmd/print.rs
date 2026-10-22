@@ -831,7 +831,8 @@ impl Block<'_> {
             return self.xs.get((col - self.cols.0) as usize).copied().unwrap_or(0.0);
         }
         let x0 = self.xs.first().copied().unwrap_or(0.0);
-        x0 + ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.k
+        let d = ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.k;
+        if self.sh.right_to_left { x0 - d } else { x0 + d }
     }
     fn y(&self, row: u32) -> f32 {
         if row >= self.rows.0 && row <= self.rows.1 + 1 {
@@ -840,9 +841,16 @@ impl Block<'_> {
         let y0 = self.ys.first().copied().unwrap_or(0.0);
         y0 + ((self.sh.row_top(row) - self.sh.row_top(self.rows.0)) as f32) * self.k
     }
+    fn bounds_x(&self) -> (f32, f32) {
+        let xa = self.xs.first().copied().unwrap_or(0.0);
+        let xb = self.xs.last().copied().unwrap_or(xa);
+        (xa.min(xb), (xb - xa).abs())
+    }
     fn rect(&self, r: RangeRef) -> (f32, f32, f32, f32) {
-        let (x0, y0) = (self.x(r.start.col), self.y(r.start.row));
-        (x0, y0, self.x(r.end.col.saturating_add(1)) - x0, self.y(r.end.row.saturating_add(1)) - y0)
+        let (xa, xb) = (self.x(r.start.col), self.x(r.end.col.saturating_add(1)));
+        let (x0, x1) = (xa.min(xb), xa.max(xb));
+        let y0 = self.y(r.start.row);
+        (x0, y0, x1 - x0, self.y(r.end.row.saturating_add(1)) - y0)
     }
     fn range(&self) -> RangeRef {
         RangeRef::new(CellRef::new(self.rows.0, self.cols.0), CellRef::new(self.rows.1, self.cols.1))
@@ -884,8 +892,9 @@ fn font_for(style: &Style) -> Font {
 
 /// Draws the cells of a block: fills, gridlines, data bars, borders and text.
 fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut Option<crate::cf::CfCache>) {
-    let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
-    let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
+    let (bx, bw) = b.bounds_x();
+    let by = b.ys.first().copied().unwrap_or(0.0);
+    let bh = b.ys.last().copied().unwrap_or(by) - by;
     if bw <= 0.0 || bh <= 0.0 {
         return;
     }
@@ -982,10 +991,11 @@ fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut Option<crate::
             ),
             None => (bd.right, bd.bottom),
         };
+        let (left_bd, right_bd) = if sh.right_to_left { (right, bd.left) } else { (bd.left, right) };
         draw_border(pg, &bd.top, b.wb, x, y, x + w, y, b.k);
         draw_border(pg, &bottom, b.wb, x, y + h, x + w, y + h, b.k);
-        draw_border(pg, &bd.left, b.wb, x, y, x, y + h, b.k);
-        draw_border(pg, &right, b.wb, x + w, y, x + w, y + h, b.k);
+        draw_border(pg, &left_bd, b.wb, x, y, x, y + h, b.k);
+        draw_border(pg, &right_bd, b.wb, x + w, y, x + w, y + h, b.k);
         draw_border(pg, &bd.diag_down, b.wb, x, y, x + w, y + h, b.k);
         draw_border(pg, &bd.diag_up, b.wb, x, y + h, x + w, y, b.k);
     }
@@ -1142,12 +1152,13 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     // Center Across Selection spans the empty Center Across cells to its right; the text stays within that run.
     let spans = st.align.h == HAlign::CenterAcross && !wrap && !merged && rot == 0;
     let across = if spans { center_across_width(&wb.styles, sh, c, merges) * b.k } else { 0.0 };
-    let (mut clip_l, mut clip_r) = (x, x + w + across);
+    let (mut clip_l, mut clip_r) = if sh.right_to_left { (x - across, x + w) } else { (x, x + w + across) };
     if !wrap && !merged && !is_num && rot.abs() != 90 && across <= 0.0 && tw + 2.0 * pad + indent > w {
         let need = tw + 2.0 * pad + indent - w;
         let grow = |dir: i64, mut need: f32| -> f32 {
             let mut ext = 0.0;
-            let mut col = c.col as i64 + dir;
+            let step = if sh.right_to_left { -dir } else { dir };
+            let mut col = c.col as i64 + step;
             while need > 0.0 && col >= 0 && col < MAX_COLS as i64 {
                 let nc = CellRef::new(c.row, col as u32);
                 if !empty_for_overflow(sh, nc, merges) {
@@ -1156,7 +1167,7 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
                 let cw = sh.col_width(nc.col) * b.k;
                 ext += cw;
                 need -= cw;
-                col += dir;
+                col += step;
                 if ext > 20_000.0 {
                     break;
                 }
@@ -1211,11 +1222,12 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
         pg.restore();
         return;
     }
+    let span_x = if sh.right_to_left { x - across } else { x };
     for (i, line) in lines.iter().enumerate() {
         let lw = gridcraft_pdf::text_width(font, size, line);
         let lx = match h_align {
             HAlign::Right => x + w - pad - lw - indent,
-            HAlign::Center => x + (w + across - lw) / 2.0,
+            HAlign::Center => span_x + (w + across - lw) / 2.0,
             _ => x + pad + indent,
         };
         let ly = first_baseline + i as f32 * line_h;
@@ -1260,10 +1272,18 @@ fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block) 
     let block = b.range();
     let (sx0, sy0) = (sh.col_left(block.start.col), sh.row_top(block.start.row));
     let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), sh.row_top(block.end.row.saturating_add(1)));
-    let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
-    let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
+    let (bx, bw) = b.bounds_x();
+    let by = b.ys.first().copied().unwrap_or(0.0);
+    let bh = b.ys.last().copied().unwrap_or(by) - by;
     let visible = |r: (f64, f64, f64, f64)| r.2 > 0.0 && r.3 > 0.0 && r.0 < sx1 && r.0 + r.2 > sx0 && r.1 < sy1 && r.1 + r.3 > sy0;
-    let place = |r: (f64, f64, f64, f64)| (bx + ((r.0 - sx0) as f32) * b.k, by + ((r.1 - sy0) as f32) * b.k, r.2 as f32 * b.k, r.3 as f32 * b.k);
+    let place = |r: (f64, f64, f64, f64)| {
+        let px = if sh.right_to_left {
+            bx + bw - ((r.0 - sx0 + r.2) as f32) * b.k
+        } else {
+            bx + ((r.0 - sx0) as f32) * b.k
+        };
+        (px, by + ((r.1 - sy0) as f32) * b.k, r.2 as f32 * b.k, r.3 as f32 * b.k)
+    };
     pg.save();
     pg.clip_rect(bx, by, bw, bh);
     for sp in &sh.sparklines {
@@ -1374,7 +1394,8 @@ fn draw_headings(pg: &mut Page, b: &Block, col_heads: bool, row_heads: bool, at:
     if col_heads {
         let y = at.1;
         for col in b.cols.0..=b.cols.1 {
-            let (x0, x1) = (b.x(col), b.x(col + 1));
+            let (xa, xb) = (b.x(col), b.x(col + 1));
+            let (x0, x1) = (xa.min(xb), xa.max(xb));
             if x1 - x0 <= 0.0 {
                 continue;
             }
@@ -1437,11 +1458,21 @@ fn draw_header_footer(pg: &mut Page, lay: &SheetLayout, which: gridcraft_model::
 fn make_block<'a>(wb: &'a Workbook, si: usize, sh: &'a Sheet, rows: (u32, u32), cols: (u32, u32), x: f32, y: f32, lay: &SheetLayout) -> Block<'a> {
     let k = lay.k();
     let mut xs = Vec::with_capacity((cols.1 - cols.0 + 2) as usize);
-    let mut acc = x;
-    xs.push(acc);
-    for c in cols.0..=cols.1 {
-        acc += sh.col_width(c) * k;
+    if sh.right_to_left {
+        let total_w: f32 = (cols.0..=cols.1).map(|c| sh.col_width(c) * k).sum();
+        let mut acc = x + total_w;
         xs.push(acc);
+        for c in cols.0..=cols.1 {
+            acc -= sh.col_width(c) * k;
+            xs.push(acc);
+        }
+    } else {
+        let mut acc = x;
+        xs.push(acc);
+        for c in cols.0..=cols.1 {
+            acc += sh.col_width(c) * k;
+            xs.push(acc);
+        }
     }
     let mut ys = Vec::with_capacity((rows.1 - rows.0 + 2) as usize);
     let mut acc = y;
@@ -1489,20 +1520,33 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             let csegs = segments(lay.title_cols, cband);
             let content_w = (lay.heading_w + csegs.iter().map(|s| seg_size(sh, *s, false)).sum::<f32>()) * k;
             let content_h = (lay.heading_h + rsegs.iter().map(|s| seg_size(sh, *s, true)).sum::<f32>()) * k;
-            let ox = lay.margins[0] + if lay.settings.center_h { ((aw - content_w) / 2.0).max(0.0) } else { 0.0 };
+            let ox = if lay.settings.center_h {
+                lay.margins[0] + ((aw - content_w) / 2.0).max(0.0)
+            } else if sh.right_to_left {
+                (lay.page_w - lay.margins[1] - content_w).max(lay.margins[0])
+            } else {
+                lay.margins[0]
+            };
             let oy = lay.margins[2] + if lay.settings.center_v { ((ah - content_h) / 2.0).max(0.0) } else { 0.0 };
+            let head_x = if sh.right_to_left { ox + content_w - lay.heading_w * k } else { ox };
             let pg = doc.add_page(lay.page_w, lay.page_h);
             let mut y = oy + lay.heading_h * k;
             let mut body: Option<Block> = None;
             for (rsi, rs) in rsegs.iter().enumerate() {
-                let mut x = ox + lay.heading_w * k;
+                let mut x = if sh.right_to_left { head_x } else { ox + lay.heading_w * k };
                 for (csi, cs) in csegs.iter().enumerate() {
+                    let seg_w = seg_size(sh, *cs, false) * k;
+                    if sh.right_to_left {
+                        x -= seg_w;
+                    }
                     let b = make_block(wb, lay.sheet, sh, *rs, *cs, x, y, lay);
                     draw_block(pg, &b, lay.settings.gridlines, &mut cf);
                     if lay.settings.headings {
-                        draw_headings(pg, &b, rsi == 0, csi == 0, (ox, oy), (lay.heading_w * k, lay.heading_h * k));
+                        draw_headings(pg, &b, rsi == 0, csi == 0, (head_x, oy), (lay.heading_w * k, lay.heading_h * k));
                     }
-                    x += seg_size(sh, *cs, false) * k;
+                    if !sh.right_to_left {
+                        x += seg_w;
+                    }
                     if rsi + 1 == rsegs.len() && csi + 1 == csegs.len() {
                         body = Some(b);
                     }
@@ -1514,8 +1558,8 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             }
             if lay.settings.headings {
                 let fill = [0xF2, 0xF2, 0xF2];
-                pg.fill_rect(ox, oy, lay.heading_w * k, lay.heading_h * k, fill);
-                pg.rect_stroke(ox, oy, lay.heading_w * k, lay.heading_h * k, 0.3, [0xA0, 0xA0, 0xA0]);
+                pg.fill_rect(head_x, oy, lay.heading_w * k, lay.heading_h * k, fill);
+                pg.rect_stroke(head_x, oy, lay.heading_w * k, lay.heading_h * k, 0.3, [0xA0, 0xA0, 0xA0]);
             }
             let cx = HfContext {
                 page: page_no,
@@ -2196,5 +2240,25 @@ mod tests {
         assert!(!text.contains("(Out of selection) Tj"), "selection print should exclude D5");
         assert!(!text.contains("(????) Tj"), "Arabic must not be replaced by question marks");
         assert!(text.contains("/Subtype /Type0") && text.contains("/Identity-H"), "Arabic PDF should embed Type0 Identity-H font");
+    }
+
+    #[test]
+    fn rtl_sheet_lays_out_columns_from_right_to_left_in_pdf() {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A1", "input": "COL_A"})).unwrap();
+        s.execute("cell.set", json!({"cell": "B1", "input": "COL_B"})).unwrap();
+        s.execute("cell.set", json!({"cell": "C1", "input": "COL_C"})).unwrap();
+        s.execute("view.rightToLeft", json!({"on": true})).unwrap();
+        let (pdf, _) = pdf_of(&mut s, json!({}));
+        let text = String::from_utf8_lossy(&pdf);
+        let x_of = |label: &str| -> f32 {
+            let needle = format!("({label}) Tj");
+            let pos = text.find(&needle).expect(label);
+            let before = &text[..pos];
+            let tm_line = before.lines().rev().find(|l| l.ends_with(" Tm")).expect("Tm line");
+            tm_line.split_whitespace().nth(4).unwrap().parse::<f32>().unwrap()
+        };
+        let (xa, xb, xc) = (x_of("COL_A"), x_of("COL_B"), x_of("COL_C"));
+        assert!(xa > xb && xb > xc, "RTL sheet should place A to the right of B and B to the right of C: xa={xa}, xb={xb}, xc={xc}");
     }
 }

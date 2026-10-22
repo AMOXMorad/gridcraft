@@ -1180,15 +1180,26 @@ pub(crate) fn paint_quadrant(
         if fill_char.is_none() && (effective_dir == TextDirection::Rtl || contains_rtl(&text)) {
             text = shape_bidi(&text).into_owned();
         }
-        let halign = match st.align.h {
+        let screen_halign = match st.align.h {
             HAlign::General => match v {
                 Value::Number(_) => HAlign::Right,
                 Value::Bool(_) | Value::Error(_) => HAlign::Center,
                 _ if numeric => HAlign::Right,
-                _ if effective_dir == TextDirection::Rtl => HAlign::Right,
+                _ if effective_dir == TextDirection::Rtl || sh.right_to_left => HAlign::Right,
                 _ => HAlign::Left,
             },
             h => h,
+        };
+        // `mirror_painted` reflects the quadrant horizontally across `axis` on right-to-left sheets,
+        // so pre-mirror Left lands on screen Right and pre-mirror Right lands on screen Left.
+        let halign = if sh.right_to_left {
+            match screen_halign {
+                HAlign::Left | HAlign::Justify => HAlign::Right,
+                HAlign::Right => HAlign::Left,
+                other => other,
+            }
+        } else {
+            screen_halign
         };
         let indent = st.align.indent as f32 * 9.0 * z;
         let pad = 2.5 * z;
@@ -1197,15 +1208,19 @@ pub(crate) fn paint_quadrant(
         if !rotated && (st.align.wrap || st.align.h == HAlign::Justify) {
             let wrap_w = (rect.width() - 2.0 * pad - indent).max(4.0);
             let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), color, wrap_w);
-            job.halign = match halign {
+            let job_halign = match screen_halign {
                 HAlign::Center | HAlign::CenterAcross => egui::Align::Center,
                 HAlign::Right => egui::Align::RIGHT,
                 _ => egui::Align::LEFT,
             };
+            job.halign = job_halign;
             let galley = p.layout_job(job);
-            let x = match halign {
-                HAlign::Center | HAlign::CenterAcross => rect.center().x,
-                HAlign::Right => rect.right() - pad,
+            let gw = galley.size().x;
+            let x = match (halign, job_halign) {
+                (HAlign::Center | HAlign::CenterAcross, _) => rect.center().x,
+                (HAlign::Right, egui::Align::RIGHT) => rect.right() - pad - indent,
+                (HAlign::Right, _) => rect.right() - pad - indent - gw,
+                (_, egui::Align::RIGHT) => text_left + pad + indent + gw,
                 _ => text_left + pad + indent,
             };
             let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
@@ -1306,7 +1321,7 @@ pub(crate) fn paint_quadrant(
             } else {
                 galley.clone()
             };
-            let pos = rotated_text_pos(*rect, galley.size(), angle, st.align.h, st.align.v, pad, indent);
+            let pos = rotated_text_pos(*rect, galley.size(), angle, halign, st.align.v, pad, indent);
             let mut shape = egui::epaint::TextShape::new(pos, galley, color);
             shape.angle = angle;
             cp.add(shape);

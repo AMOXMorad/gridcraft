@@ -532,10 +532,19 @@ fn valign(s: &mut Session, p: &Json, a: VAlign) -> Result<Json> {
 }
 
 fn indent(s: &mut Session, p: &Json, d: i32) -> Result<Json> {
+    let default_h = s
+        .active()
+        .and_then(|doc| {
+            let sh = doc.wb.active()?;
+            let c = doc.selection.active;
+            let text_rtl = sh.value_ref(c).and_then(|v| v.as_text()).is_some_and(|t| gridcraft_core::detect_direction(t) == gridcraft_core::TextDirection::Rtl);
+            Some(if sh.right_to_left || text_rtl { HAlign::Right } else { HAlign::Left })
+        })
+        .unwrap_or(HAlign::Left);
     apply_style(s, p, |st| {
         st.align.indent = (st.align.indent as i32 + d).clamp(0, 250) as u8;
         if st.align.indent > 0 && matches!(st.align.h, HAlign::General | HAlign::Center | HAlign::Fill | HAlign::Justify | HAlign::CenterAcross) {
-            st.align.h = HAlign::Left;
+            st.align.h = default_h;
         }
     })
 }
