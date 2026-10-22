@@ -282,8 +282,20 @@ fn mirror_bracket(ch: char) -> char {
     }
 }
 
-/// Shapes Arabic letters into contextual presentation forms and reorders bidirectional runs into
-/// left-to-right visual order for renderers (like `egui`) that draw glyphs strictly left-to-right.
+/// Prepares bidirectional text for `egui` / `epaint` rendering.
+///
+/// `epaint 0.36+` shapes text runs with `harfrust` (`guess_segment_properties()`):
+/// - When the first strong character in a line is RTL (Arabic/Hebrew), `harfrust` selects
+///   `Direction::RightToLeft`, runs the OpenType Arabic shaper (`GSUB`/`GPOS`) in logical buffer
+///   order, mirrors paired brackets, and reverses the entire glyph buffer at the end of shaping.
+///   Therefore, for RTL-leading lines we keep RTL runs in logical order (avoiding double-reversal
+///   and preserving native OpenType shaping) and pre-reverse only embedded LTR islands (numbers,
+///   file extensions like `.xlsx`, shortcuts like `Ctrl+Z`, percentages like `100%`) so that
+///   `harfrust`'s buffer reversal restores them to left-to-right visual order.
+/// - When the first strong character in a mixed line is LTR (e.g. `"Hello مرحبا"`), `harfrust`
+///   selects `Direction::LeftToRight` and does not reverse the buffer or run the Arabic shaper;
+///   in that case we shape RTL islands into Arabic Presentation Forms-B and reverse each RTL
+///   island in place.
 ///
 /// If `text` contains no RTL characters, returns `Cow::Borrowed(text)` without allocating.
 pub fn shape_bidi(text: &str) -> Cow<'_, str> {
@@ -295,50 +307,86 @@ pub fn shape_bidi(text: &str) -> Cow<'_, str> {
         if line_idx > 0 {
             result.push('\n');
         }
-        let shaped = shape_arabic_logical(line);
-        reorder_line_visual(&shaped, &mut result);
+        reorder_line_for_harfrust(line, &mut result);
     }
-    Cow::Owned(result)
+    if result == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(result)
+    }
 }
 
-/// Visual reordering for a single line containing RTL characters.
-fn reorder_line_visual(shaped_line: &str, out: &mut String) {
-    let chars: Vec<char> = shaped_line.chars().collect();
-    if chars.is_empty() {
+/// Prepares a single line for `epaint`'s `harfrust` text shaper.
+fn reorder_line_for_harfrust(line: &str, out: &mut String) {
+    if !contains_rtl(line) {
+        out.push_str(line);
         return;
     }
 
-    // Determine whether each character belongs to an LTR island (Latin letters / digits) or RTL flow.
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return;
+    }
+
+    // Determine whether the first strong character is RTL (so harfrust will use Direction::RightToLeft
+    // and reverse the entire buffer) or LTR (so harfrust will use Direction::LeftToRight).
+    let first_strong_rtl = chars
+        .iter()
+        .copied()
+        .find_map(|c| match bidi_class(c) {
+            BidiClass::R | BidiClass::Al => Some(true),
+            BidiClass::L => Some(false),
+            BidiClass::En | BidiClass::Other => None,
+        })
+        .unwrap_or(true);
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum RunDir {
         Rtl,
         Ltr,
     }
 
-    let n = chars.len();
+    let is_ltr_core = |c: char| matches!(bidi_class(c), BidiClass::L | BidiClass::En);
+
     let mut dirs = vec![RunDir::Rtl; n];
     for (i, &ch) in chars.iter().enumerate() {
-        match bidi_class(ch) {
-            BidiClass::L | BidiClass::En => dirs[i] = RunDir::Ltr,
-            BidiClass::R | BidiClass::Al => dirs[i] = RunDir::Rtl,
-            BidiClass::Other => {
-                // Keep numeric separators (.,+-/:%) and template braces ({n}, {page}) inside an LTR run
-                if matches!(ch, '.' | ',' | ':' | '/' | '-' | '+')
-                    && i > 0
-                    && dirs[i - 1] == RunDir::Ltr
-                    && chars.get(i + 1).is_some_and(|&next| matches!(bidi_class(next), BidiClass::L | BidiClass::En))
-                {
-                    dirs[i] = RunDir::Ltr;
-                } else if ch == '{' && chars.get(i + 1).is_some_and(|&next| matches!(bidi_class(next), BidiClass::L | BidiClass::En)) {
-                    dirs[i] = RunDir::Ltr;
-                } else if ch == '}' && i > 0 && dirs[i - 1] == RunDir::Ltr {
-                    dirs[i] = RunDir::Ltr;
-                }
-            }
+        if is_ltr_core(ch) {
+            dirs[i] = RunDir::Ltr;
         }
     }
 
-    // Group into contiguous runs of (RunDir, Range)
+    // Include prefix symbols (`*.xlsx`, `.csv`, `+10`, `-5`, `$100`), internal connectors
+    // (`UTF-8`, `Ctrl+Z`, `A1:B2`, `1,000.50`, `{n}`), and suffix symbols (`100%`, `90°`)
+    // in the adjacent LTR island so harfrust's full-buffer reversal keeps the whole token intact.
+    for i in 0..n {
+        if dirs[i] == RunDir::Ltr {
+            continue;
+        }
+        let ch = chars[i];
+        let prev_ltr = i > 0 && dirs[i - 1] == RunDir::Ltr;
+        let next_ltr = chars.get(i + 1).is_some_and(|&c| is_ltr_core(c));
+        let next2_ltr = chars.get(i + 1).is_some_and(|&c| c == '.')
+            && chars.get(i + 2).is_some_and(|&c| is_ltr_core(c));
+
+        if matches!(ch, '.' | ',' | ':' | '/' | '-' | '+' | '_' | '!') && prev_ltr && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if matches!(ch, '.' | '+' | '-' | '$' | '€' | '£' | '¥' | '#') && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '*' && (next_ltr || next2_ltr) {
+            dirs[i] = RunDir::Ltr;
+            if next2_ltr && i + 1 < n {
+                dirs[i + 1] = RunDir::Ltr;
+            }
+        } else if matches!(ch, '%' | '°') && prev_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '{' && next_ltr {
+            dirs[i] = RunDir::Ltr;
+        } else if ch == '}' && prev_ltr {
+            dirs[i] = RunDir::Ltr;
+        }
+    }
+
     let mut runs: Vec<(RunDir, usize, usize)> = Vec::new();
     let mut start = 0;
     while start < n {
@@ -351,31 +399,35 @@ fn reorder_line_visual(shaped_line: &str, out: &mut String) {
         start = end;
     }
 
-    // Base paragraph direction for a line with RTL: if predominantly LTR, keep run order and reverse
-    // only RTL runs; if RTL (or Auto with RTL), reverse the sequence of runs and reverse RTL chars.
-    let base_rtl = detect_direction(shaped_line) != TextDirection::Ltr;
-    if base_rtl {
-        for &(dir, s, e) in runs.iter().rev() {
+    if first_strong_rtl {
+        // harfrust will shape Arabic in forward buffer order and then reverse the entire buffer.
+        // Keep RTL runs in logical order and pre-reverse embedded LTR islands in place.
+        for &(dir, s, e) in &runs {
             let slice = chars.get(s..e).unwrap_or_default();
             match dir {
                 RunDir::Rtl => {
-                    for &ch in slice.iter().rev() {
-                        out.push(mirror_bracket(ch));
+                    for &ch in slice {
+                        out.push(ch);
                     }
                 }
                 RunDir::Ltr => {
-                    for &ch in slice {
+                    for &ch in slice.iter().rev() {
                         out.push(ch);
                     }
                 }
             }
         }
     } else {
+        // First strong character is Latin: harfrust will use Direction::LeftToRight and will not
+        // reverse the buffer or run the Arabic shaper. Shape and reverse each RTL island in place.
         for &(dir, s, e) in &runs {
             let slice = chars.get(s..e).unwrap_or_default();
             match dir {
                 RunDir::Rtl => {
-                    for &ch in slice.iter().rev() {
+                    let segment: String = slice.iter().copied().collect();
+                    let shaped = shape_arabic_logical(&segment);
+                    let shaped_chars: Vec<char> = shaped.chars().collect();
+                    for &ch in shaped_chars.iter().rev() {
                         out.push(mirror_bracket(ch));
                     }
                 }
@@ -455,9 +507,10 @@ mod tests {
         let shaped = shape_arabic_logical("مرحبا");
         assert_eq!(shaped.chars().collect::<Vec<_>>(), vec!['\u{FEE3}', '\u{FEAE}', '\u{FEA3}', '\u{FE92}', '\u{FE8E}']);
 
-        // Visual BiDi order for "مرحبا" reverses the RTL sequence for left-to-right drawing:
-        let visual = shape_bidi("مرحبا");
-        assert_eq!(visual.chars().collect::<Vec<_>>(), vec!['\u{FE8E}', '\u{FE92}', '\u{FEA3}', '\u{FEAE}', '\u{FEE3}']);
+        // Pure RTL strings stay in logical order for harfrust's RTL shaper (no double-reversal):
+        let for_harfrust = shape_bidi("مرحبا");
+        assert_eq!(for_harfrust, "مرحبا");
+        assert!(matches!(for_harfrust, Cow::Borrowed(_)));
 
         // Lam-Alef ligature: "لا" -> isolated FEFB; "بلا" -> ب (initial FE91) + لا (final FEFC)
         assert_eq!(shape_arabic_logical("لا"), "\u{FEFB}");
@@ -465,12 +518,19 @@ mod tests {
     }
 
     #[test]
-    fn shape_bidi_preserves_ltr_without_allocating_and_keeps_numbers_ltr() {
+    fn shape_bidi_preserves_ltr_without_allocating_and_pre_reverses_embedded_ltr_for_harfrust() {
         let ascii = "Hello 12345";
         assert!(matches!(shape_bidi(ascii), Cow::Borrowed(_)));
 
-        // Arabic with embedded number "المجموع 125" keeps "125" in left-to-right digit order
+        // In an RTL-leading string, embedded LTR runs are pre-reversed in place so that when
+        // harfrust reverses the full RTL buffer, the LTR run appears in left-to-right order:
         let mixed = shape_bidi("المجموع 125");
-        assert!(mixed.starts_with("125 "), "numbers stay LTR on the visual left of an RTL phrase: {mixed:?}");
+        assert_eq!(mixed, "المجموع 521");
+
+        let ext = shape_bidi("حفظ مصنفات .xlsx تلقائياً");
+        assert_eq!(ext, "حفظ مصنفات xslx. تلقائياً");
+
+        let pct = shape_bidi("تلقائي (100%)");
+        assert_eq!(pct, "تلقائي (%001)");
     }
 }
